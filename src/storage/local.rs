@@ -123,22 +123,22 @@ impl Storage for LocalStorage {
                 .await
                 .map_err(|e| map_io_error(&path, e))?;
             let mime = mime_from_extension(ext).to_string();
-            Ok(FileContent::Image(DataURI::new(mime, &bytes), token))
+            Ok(FileContent::Image { content: DataURI::new(mime, &bytes), token })
         } else {
             let content = fs::read_to_string(&full_path)
                 .await
                 .map_err(|e| map_io_error(&path, e))?;
-            Ok(FileContent::Markdown(content, token))
+            Ok(FileContent::Markdown { content, token })
         }
     }
 
-    async fn write(&self, path: PathBuf, data: FileContent) -> Result<(), StorageError> {
+    async fn write(&self, path: PathBuf, data: FileContent) -> Result<RevisionToken, StorageError> {
         let full_path = self.resolve(&path);
 
         if full_path.exists() {
             let expected = match &data {
-                FileContent::Markdown(_, token) => token,
-                FileContent::Image(_, token) => token,
+                FileContent::Markdown { token, .. } => token,
+                FileContent::Image { token, .. } => token,
             };
             self.check_revision(&path, expected).await?;
         }
@@ -150,12 +150,12 @@ impl Storage for LocalStorage {
         }
 
         match data {
-            FileContent::Markdown(content, _) => {
+            FileContent::Markdown { content, .. } => {
                 fs::write(&full_path, content.as_bytes())
                     .await
                     .map_err(|e| map_io_error(&path, e))?;
             }
-            FileContent::Image(data_uri, _) => {
+            FileContent::Image { content: data_uri, .. } => {
                 let bytes = data_uri
                     .decode()
                     .map_err(|_| StorageError::PermissionDenied(path.clone()))?;
@@ -165,7 +165,10 @@ impl Storage for LocalStorage {
             }
         }
 
-        Ok(())
+        let metadata = fs::metadata(&full_path)
+            .await
+            .map_err(|e| map_io_error(&path, e))?;
+        Ok(self.revision_token(&metadata))
     }
 
     async fn delete(&self, path: PathBuf, expected_token: RevisionToken) -> Result<(), StorageError> {
@@ -199,7 +202,7 @@ impl Storage for LocalStorage {
             .map_err(|e| map_io_error(&from, e))
     }
 
-    async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<(), StorageError> {
+    async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<RevisionToken, StorageError> {
         let full_from = self.resolve(&from);
         let full_to = self.resolve(&to);
 
@@ -213,7 +216,10 @@ impl Storage for LocalStorage {
             .await
             .map_err(|e| map_io_error(&from, e))?;
 
-        Ok(())
+        let metadata = fs::metadata(&full_to)
+            .await
+            .map_err(|e| map_io_error(&to, e))?;
+        Ok(self.revision_token(&metadata))
     }
 
     async fn is_exists(&self, path: PathBuf) -> Result<bool, StorageError> {
@@ -266,7 +272,7 @@ impl StorageEventListener for LocalStorage {
                                     .expect("modified time before UNIX epoch");
                                 let token: RevisionToken =
                                     format!("{}:{}", duration.as_nanos(), meta.len()).into();
-                                yield StorageEvent::Created(path, token);
+                                yield StorageEvent::Created { path, token };
                             }
                         }
                     }
@@ -280,13 +286,13 @@ impl StorageEventListener for LocalStorage {
                                     .expect("modified time before UNIX epoch");
                                 let token: RevisionToken =
                                     format!("{}:{}", duration.as_nanos(), meta.len()).into();
-                                yield StorageEvent::Updated(path, token);
+                                yield StorageEvent::Updated { path, token };
                             }
                         }
                     }
                     EventKind::Remove(_) => {
                         for path in paths {
-                            yield StorageEvent::Deleted(path);
+                            yield StorageEvent::Deleted { path };
                         }
                     }
                     _ => {}
