@@ -1,0 +1,12 @@
+[package]
+name = "tarn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "~1.50", features = ["fs", "sync"] }
+async-stream = "~0.3"
+futures-core = "~0.3"
+thiserror = "~2.0"
+base64 = "~0.22"
+notify = "~8.2"
