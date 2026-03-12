@@ -6,8 +6,8 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::fs;
 use tokio::sync::mpsc;
 
-use crate::common::RevisionToken;
-use crate::storage::{FileContent, Storage, StorageError, StorageEvent, StorageEventListener};
+use crate::core::common::RevisionToken;
+use crate::core::storage::{FileContent, Storage, StorageError, StorageEvent, StorageEventListener};
 
 fn map_io_error(path: &Path, err: std::io::Error) -> StorageError {
     match err.kind() {
@@ -126,7 +126,7 @@ impl Storage for LocalStorage {
                 .map_err(|e| map_io_error(&path, e))?;
             let mime = mime_from_extension(ext).to_string();
             Ok(FileContent::Image {
-                content: crate::common::DataURI::new(mime, &bytes),
+                content: crate::core::common::DataURI::new(mime, &bytes),
                 token,
             })
         } else {

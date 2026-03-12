@@ -61,7 +61,7 @@ impl FromStr for Frontmatter {
     }
 }
 
-pub(super) fn split_frontmatter(content: &str) -> (Frontmatter, String) {
+pub(crate) fn split_frontmatter(content: &str) -> (Frontmatter, String) {
     let Some(caps) = FRONTMATTER_RE.captures(content) else {
         return (Frontmatter::default(), content.to_string());
     };
@@ -74,7 +74,7 @@ pub(super) fn split_frontmatter(content: &str) -> (Frontmatter, String) {
     (frontmatter, body.to_string())
 }
 
-pub(super) fn try_split_frontmatter(
+pub(crate) fn try_split_frontmatter(
     content: &str,
 ) -> Result<(Frontmatter, String), yaml_serde::Error> {
     let Some(caps) = FRONTMATTER_RE.captures(content) else {

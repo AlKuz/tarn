@@ -34,7 +34,7 @@ fn strip_code(content: &str) -> String {
     result
 }
 
-pub(super) fn extract_inline_tags(content: &str) -> HashSet<String> {
+pub(crate) fn extract_inline_tags(content: &str) -> HashSet<String> {
     let stripped = strip_code(content);
     let mut tags = HashSet::new();
 

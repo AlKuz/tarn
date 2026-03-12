@@ -27,7 +27,7 @@ pub struct Section {
     pub word_count: usize,
 }
 
-pub(super) fn parse_sections(body: &str) -> Vec<Section> {
+pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
     let mut sections: Vec<Section> = Vec::new();
     let mut current_heading: Option<Heading> = None;
     let mut current_content = String::new();

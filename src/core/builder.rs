@@ -1,6 +1,6 @@
-use crate::config::{Config, StorageConfig};
-use crate::storage::Storage;
-use crate::storage::local::LocalStorage;
+use crate::core::config::{Config, StorageConfig};
+use crate::core::storage::Storage;
+use crate::core::storage::local::LocalStorage;
 
 pub(crate) struct Builder {
     config: Config,
