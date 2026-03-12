@@ -113,17 +113,17 @@ impl Storage for LocalStorage {
             .map_err(|e| map_io_error(&path, e))?;
 
         let token = self.revision_token(&metadata);
-        let ext = full_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         if self.is_image(ext) {
             let bytes = fs::read(&full_path)
                 .await
                 .map_err(|e| map_io_error(&path, e))?;
             let mime = mime_from_extension(ext).to_string();
-            Ok(FileContent::Image { content: DataURI::new(mime, &bytes), token })
+            Ok(FileContent::Image {
+                content: DataURI::new(mime, &bytes),
+                token,
+            })
         } else {
             let content = fs::read_to_string(&full_path)
                 .await
@@ -155,7 +155,9 @@ impl Storage for LocalStorage {
                     .await
                     .map_err(|e| map_io_error(&path, e))?;
             }
-            FileContent::Image { content: data_uri, .. } => {
+            FileContent::Image {
+                content: data_uri, ..
+            } => {
                 let bytes = data_uri
                     .decode()
                     .map_err(|_| StorageError::PermissionDenied(path.clone()))?;
@@ -171,7 +173,11 @@ impl Storage for LocalStorage {
         Ok(self.revision_token(&metadata))
     }
 
-    async fn delete(&self, path: PathBuf, expected_token: RevisionToken) -> Result<(), StorageError> {
+    async fn delete(
+        &self,
+        path: PathBuf,
+        expected_token: RevisionToken,
+    ) -> Result<(), StorageError> {
         self.check_revision(&path, &expected_token).await?;
 
         let full_path = self.resolve(&path);

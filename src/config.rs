@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub enum StorageConfig{
+pub enum StorageConfig {
     Local(LocalStorageConfig),
 }
 
-pub struct LocalStorageConfig{
+pub struct LocalStorageConfig {
     pub path: PathBuf,
 }
 
-
-pub struct Config{
-    pub storage: StorageConfig
+pub struct Config {
+    pub storage: StorageConfig,
 }
 
 impl Config {
@@ -26,7 +25,7 @@ impl Config {
                     .expect("STORAGE__PATH missing for local storage")
                     .into();
                 StorageConfig::Local(LocalStorageConfig { path })
-            },
+            }
             _ => panic!("Unsupported storage type: {}", storage_type),
         }
     }

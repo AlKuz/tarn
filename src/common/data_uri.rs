@@ -1,6 +1,6 @@
+use base64::Engine;
 use std::fmt;
 use std::str::FromStr;
-use base64::Engine;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataURIError {
@@ -27,9 +27,11 @@ impl DataURI {
             data: base64::engine::general_purpose::STANDARD.encode(data),
         }
     }
-    
+
     pub fn decode(&self) -> Result<Vec<u8>, DataURIError> {
-        base64::engine::general_purpose::STANDARD.decode(&self.data).map_err(DataURIError::InvalidBase64)
+        base64::engine::general_purpose::STANDARD
+            .decode(&self.data)
+            .map_err(DataURIError::InvalidBase64)
     }
 }
 
@@ -38,7 +40,9 @@ impl FromStr for DataURI {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let rest = s.strip_prefix("data:").ok_or(DataURIError::MissingPrefix)?;
-        let (mime, data) = rest.split_once(";base64,").ok_or(DataURIError::MissingSeparator)?;
+        let (mime, data) = rest
+            .split_once(";base64,")
+            .ok_or(DataURIError::MissingSeparator)?;
         if mime.is_empty() {
             return Err(DataURIError::EmptyMime);
         }
