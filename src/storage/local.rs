@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_stream::stream;
 use futures_core::stream::Stream;
@@ -6,15 +6,32 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::fs;
 use tokio::sync::mpsc;
 
-use crate::common::{DataURI, RevisionToken};
+use crate::common::RevisionToken;
 use crate::storage::{FileContent, Storage, StorageError, StorageEvent, StorageEventListener};
 
-fn map_io_error(path: &PathBuf, err: std::io::Error) -> StorageError {
+fn map_io_error(path: &Path, err: std::io::Error) -> StorageError {
     match err.kind() {
-        std::io::ErrorKind::NotFound => StorageError::NotFound(path.clone()),
-        std::io::ErrorKind::PermissionDenied => StorageError::PermissionDenied(path.clone()),
-        _ => StorageError::NotFound(path.clone()),
+        std::io::ErrorKind::NotFound => StorageError::NotFound(path.to_path_buf()),
+        std::io::ErrorKind::PermissionDenied => StorageError::PermissionDenied(path.to_path_buf()),
+        _ => StorageError::Io(path.to_path_buf(), err),
     }
+}
+
+fn revision_token(path: &Path, metadata: &std::fs::Metadata) -> Result<RevisionToken, StorageError> {
+    let modified = metadata
+        .modified()
+        .map_err(|e| StorageError::Io(path.to_path_buf(), e))?;
+    let duration = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| StorageError::InvalidData(path.to_path_buf(), e.to_string()))?;
+    let file_size = metadata.len();
+    Ok(format!("{}:{}", duration.as_nanos(), file_size).into())
+}
+
+fn try_revision_token(root: &Path, path: &Path) -> Option<RevisionToken> {
+    let full = root.join(path);
+    let meta = std::fs::metadata(&full).ok()?;
+    revision_token(path, &meta).ok()
 }
 
 fn mime_from_extension(ext: &str) -> &'static str {
@@ -40,19 +57,8 @@ impl LocalStorage {
         LocalStorage { path }
     }
 
-    fn resolve(&self, path: &PathBuf) -> PathBuf {
+    fn resolve(&self, path: &Path) -> PathBuf {
         self.path.join(path)
-    }
-
-    fn revision_token(&self, metadata: &std::fs::Metadata) -> RevisionToken {
-        let modified = metadata
-            .modified()
-            .expect("modified time unsupported on this platform");
-        let duration = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("modified time before UNIX epoch");
-        let file_size = metadata.len();
-        format!("{}:{}", duration.as_nanos(), file_size).into()
     }
 
     fn is_image(&self, ext: &str) -> bool {
@@ -64,17 +70,17 @@ impl LocalStorage {
 
     async fn check_revision(
         &self,
-        path: &PathBuf,
+        path: &Path,
         expected: &RevisionToken,
     ) -> Result<(), StorageError> {
         let full_path = self.resolve(path);
         let metadata = fs::metadata(&full_path)
             .await
             .map_err(|e| map_io_error(path, e))?;
-        let actual = self.revision_token(&metadata);
+        let actual = revision_token(path, &metadata)?;
         if *expected != actual {
             return Err(StorageError::Conflict(
-                path.clone(),
+                path.to_path_buf(),
                 expected.clone(),
                 actual,
             ));
@@ -97,9 +103,8 @@ impl Storage for LocalStorage {
                     let path = entry.path();
                     if path.is_dir() {
                         stack.push(path);
-                    } else {
-                        let relative = path.strip_prefix(&root).unwrap().to_path_buf();
-                        yield relative;
+                    } else if let Ok(relative) = path.strip_prefix(&root) {
+                        yield relative.to_path_buf();
                     }
                 }
             }
@@ -112,7 +117,7 @@ impl Storage for LocalStorage {
             .await
             .map_err(|e| map_io_error(&path, e))?;
 
-        let token = self.revision_token(&metadata);
+        let token = revision_token(&path, &metadata)?;
         let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         if self.is_image(ext) {
@@ -121,7 +126,7 @@ impl Storage for LocalStorage {
                 .map_err(|e| map_io_error(&path, e))?;
             let mime = mime_from_extension(ext).to_string();
             Ok(FileContent::Image {
-                content: DataURI::new(mime, &bytes),
+                content: crate::common::DataURI::new(mime, &bytes),
                 token,
             })
         } else {
@@ -160,7 +165,7 @@ impl Storage for LocalStorage {
             } => {
                 let bytes = data_uri
                     .decode()
-                    .map_err(|_| StorageError::PermissionDenied(path.clone()))?;
+                    .map_err(|e| StorageError::InvalidData(path.clone(), e.to_string()))?;
                 fs::write(&full_path, bytes)
                     .await
                     .map_err(|e| map_io_error(&path, e))?;
@@ -170,7 +175,7 @@ impl Storage for LocalStorage {
         let metadata = fs::metadata(&full_path)
             .await
             .map_err(|e| map_io_error(&path, e))?;
-        Ok(self.revision_token(&metadata))
+        revision_token(&path, &metadata)
     }
 
     async fn delete(
@@ -225,7 +230,7 @@ impl Storage for LocalStorage {
         let metadata = fs::metadata(&full_to)
             .await
             .map_err(|e| map_io_error(&to, e))?;
-        Ok(self.revision_token(&metadata))
+        revision_token(&to, &metadata)
     }
 
     async fn is_exists(&self, path: PathBuf) -> Result<bool, StorageError> {
@@ -235,7 +240,7 @@ impl Storage for LocalStorage {
 }
 
 impl StorageEventListener for LocalStorage {
-    async fn listen(&self) -> impl Stream<Item = StorageEvent> {
+    async fn listen(&self) -> Result<impl Stream<Item = StorageEvent>, StorageError> {
         let root = self.path.clone();
         let (tx, mut rx) = mpsc::channel(256);
 
@@ -247,13 +252,13 @@ impl StorageEventListener for LocalStorage {
             },
             notify::Config::default(),
         )
-        .expect("failed to create file watcher");
+        .map_err(|e| StorageError::Io(self.path.clone(), std::io::Error::other(e)))?;
 
         watcher
             .watch(&self.path, RecursiveMode::Recursive)
-            .expect("failed to watch directory");
+            .map_err(|e| StorageError::Io(self.path.clone(), std::io::Error::other(e)))?;
 
-        stream! {
+        Ok(stream! {
             let _watcher = watcher;
 
             while let Some(event) = rx.recv().await {
@@ -270,28 +275,14 @@ impl StorageEventListener for LocalStorage {
                 match event.kind {
                     EventKind::Create(_) => {
                         for path in paths {
-                            let full = root.join(&path);
-                            if let Ok(meta) = std::fs::metadata(&full) {
-                                let modified = meta.modified().expect("modified time unsupported");
-                                let duration = modified
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .expect("modified time before UNIX epoch");
-                                let token: RevisionToken =
-                                    format!("{}:{}", duration.as_nanos(), meta.len()).into();
+                            if let Some(token) = try_revision_token(&root, &path) {
                                 yield StorageEvent::Created { path, token };
                             }
                         }
                     }
                     EventKind::Modify(_) => {
                         for path in paths {
-                            let full = root.join(&path);
-                            if let Ok(meta) = std::fs::metadata(&full) {
-                                let modified = meta.modified().expect("modified time unsupported");
-                                let duration = modified
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .expect("modified time before UNIX epoch");
-                                let token: RevisionToken =
-                                    format!("{}:{}", duration.as_nanos(), meta.len()).into();
+                            if let Some(token) = try_revision_token(&root, &path) {
                                 yield StorageEvent::Updated { path, token };
                             }
                         }
@@ -304,6 +295,6 @@ impl StorageEventListener for LocalStorage {
                     _ => {}
                 }
             }
-        }
+        })
     }
 }

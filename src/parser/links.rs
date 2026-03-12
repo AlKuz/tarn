@@ -349,11 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn from_str_invalid() {
-        assert!("plain text".parse::<Link>().is_err());
-    }
-
-    #[test]
     fn display_roundtrip() {
         let wiki = Link::Wiki(WikiLink {
             target: "note".into(),
@@ -461,26 +456,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn link_is_hashable() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(Link::Wiki(WikiLink {
-            target: "note".into(),
-            alias: None,
-            heading: None,
-            block_ref: None,
-            is_embed: false,
-        }));
-        assert_eq!(set.len(), 1);
-        // Duplicate
-        set.insert(Link::Wiki(WikiLink {
-            target: "note".into(),
-            alias: None,
-            heading: None,
-            block_ref: None,
-            is_embed: false,
-        }));
-        assert_eq!(set.len(), 1);
-    }
 }

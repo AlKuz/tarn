@@ -12,6 +12,10 @@ pub enum StorageError {
     PermissionDenied(PathBuf),
     #[error("write conflict: {0} (expected: {1}, actual: {2})")]
     Conflict(PathBuf, RevisionToken, RevisionToken),
+    #[error("IO error on {0}: {1}")]
+    Io(PathBuf, std::io::Error),
+    #[error("invalid data at {0}: {1}")]
+    InvalidData(PathBuf, String),
 }
 
 pub enum FileContent {
@@ -51,5 +55,5 @@ pub trait Storage {
 }
 
 pub trait StorageEventListener {
-    async fn listen(&self) -> impl Stream<Item = StorageEvent>;
+    async fn listen(&self) -> Result<impl Stream<Item = StorageEvent>, StorageError>;
 }

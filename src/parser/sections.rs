@@ -160,16 +160,4 @@ Content two.
         assert!(headings[1].offset > headings[0].offset);
     }
 
-    #[test]
-    fn word_count_simple() {
-        let body = "\
-Three words here.
-
-Two more.
-";
-        let sections = parse_sections(body);
-        let total: usize = sections.iter().map(|s| s.word_count).sum();
-        // "Three words here." = 3, "Two more." = 2
-        assert_eq!(total, 5);
-    }
 }

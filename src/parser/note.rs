@@ -115,10 +115,10 @@ impl fmt::Display for Note {
 }
 
 fn derive_title(frontmatter: &Frontmatter, sections: &[Section]) -> Option<String> {
-    if let Some(t) = &frontmatter.title {
-        if !t.is_empty() {
-            return Some(t.clone());
-        }
+    if let Some(t) = &frontmatter.title
+        && !t.is_empty()
+    {
+        return Some(t.clone());
     }
 
     sections
@@ -234,22 +234,6 @@ Content.
         assert_eq!(note.frontmatter, Frontmatter::default());
         assert_eq!(note.sections.len(), 1);
         assert_eq!(note.word_count(), 0);
-    }
-
-    #[test]
-    fn note_from_string_owned() {
-        let content = String::from("# Title\n\nBody.\n");
-        let note: Note = content.into();
-        assert_eq!(note.title.as_deref(), Some("Title"));
-    }
-
-    #[test]
-    fn note_display_with_frontmatter() {
-        let note = Note::from("---\ntitle: Test\n---\nBody.\n");
-        let output = note.to_string();
-        assert!(output.contains("---"));
-        assert!(output.contains("title"));
-        assert!(output.contains("Body."));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::config::{Config, StorageConfig};
 use crate::storage::Storage;
 use crate::storage::local::LocalStorage;
 
-struct Builder {
+pub(crate) struct Builder {
     config: Config,
 }
 
