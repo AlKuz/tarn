@@ -1,6 +1,6 @@
 pub mod local;
 
-use crate::core::common::{DataURI, RevisionToken};
+use crate::common::{DataURI, RevisionToken};
 use futures_core::stream::Stream;
 use std::path::PathBuf;
 

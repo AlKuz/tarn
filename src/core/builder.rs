@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::core::config::{Config, ConfigError, LocalStorageConfig, StorageConfig};
-use crate::core::storage::local::LocalStorage;
+use crate::storage::local::LocalStorage;
 
 pub struct TarnBuilder {
     config: Config,

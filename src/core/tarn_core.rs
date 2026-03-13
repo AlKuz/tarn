@@ -6,10 +6,10 @@ use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracing::warn;
 
+use crate::common::RevisionToken;
 use crate::core::builder::TarnCore;
-use crate::core::common::RevisionToken;
-use crate::core::parser::{Frontmatter, Link, Note};
-use crate::core::storage::{FileContent, Storage, StorageError};
+use crate::parser::{Frontmatter, Link, Note};
+use crate::storage::{FileContent, Storage, StorageError};
 
 #[derive(Debug, Error)]
 pub enum CoreError {
