@@ -575,8 +575,8 @@ mod workflow_tag_navigation {
         let tags = core.get_tags(Some("programming"), false).await.unwrap();
 
         let tag_names: Vec<&str> = tags.tags.iter().map(|t| t.tag.as_str()).collect();
-        assert!(tag_names.iter().any(|t| *t == "programming/rust"));
-        assert!(tag_names.iter().any(|t| *t == "programming/web"));
+        assert!(tag_names.contains(&"programming/rust"));
+        assert!(tag_names.contains(&"programming/web"));
     }
 
     #[tokio::test]
@@ -1020,7 +1020,7 @@ mod nested_folders {
             .collect();
 
         // Should have project/webapp tag from nested notes
-        assert!(tag_names.iter().any(|t| *t == "project/webapp"));
+        assert!(tag_names.contains(&"project/webapp"));
     }
 
     #[tokio::test]
