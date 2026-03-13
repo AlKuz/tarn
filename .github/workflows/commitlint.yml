@@ -1,0 +1,29 @@
+name: Commit Lint
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install commitlint
+        run: npm install -g @commitlint/cli @commitlint/config-conventional
+
+      - name: Validate commits
+        run: |
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "Initial push, checking last commit only"
+            npx commitlint --from HEAD~1 --to HEAD --verbose || true
+          else
+            npx commitlint --from ${{ github.event.before }} --to ${{ github.event.after }} --verbose
+          fi
