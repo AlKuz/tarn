@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/AlKuz/tarn/compare/v0.1.4...v0.1.5) (2026-03-13)
+
+
+### Bug Fixes
+
+* added secrets inheritance ([#10](https://github.com/AlKuz/tarn/issues/10)) ([88e4838](https://github.com/AlKuz/tarn/commit/88e4838583475c214ef9f84fabc86592ec8d1cfe))
+
 ## [0.1.4](https://github.com/AlKuz/tarn/compare/v0.1.3...v0.1.4) (2026-03-13)
 
 
