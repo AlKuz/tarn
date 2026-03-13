@@ -280,8 +280,7 @@ impl TarnCore {
         let content = if summary {
             None
         } else if let Some(requested) = sections {
-            let requested_lower: Vec<String> =
-                requested.iter().map(|s| s.to_lowercase()).collect();
+            let requested_lower: Vec<String> = requested.iter().map(|s| s.to_lowercase()).collect();
             let mut filtered = String::new();
             for section in &note.sections {
                 if let Some(h) = &section.heading
@@ -463,7 +462,9 @@ impl TarnCore {
 
             let note_path = file_path.to_string_lossy().to_string();
             for tag in note.tags() {
-                let entry = tag_map.entry(tag.to_string()).or_insert_with(|| (0, Vec::new()));
+                let entry = tag_map
+                    .entry(tag.to_string())
+                    .or_insert_with(|| (0, Vec::new()));
                 entry.0 += 1;
                 entry.1.push(note_path.clone());
             }
@@ -471,9 +472,7 @@ impl TarnCore {
 
         let mut tags: Vec<TagInfo> = tag_map
             .into_iter()
-            .filter(|(tag, _)| {
-                prefix.is_none_or(|p| tag.starts_with(p))
-            })
+            .filter(|(tag, _)| prefix.is_none_or(|p| tag.starts_with(p)))
             .map(|(tag, (count, note_paths))| {
                 let children: Vec<String> = Vec::new();
                 TagInfo {

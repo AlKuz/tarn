@@ -24,7 +24,9 @@ pub struct Config {
 }
 
 impl Config {
-    fn get_storage_config(variables: &HashMap<String, String>) -> Result<StorageConfig, ConfigError> {
+    fn get_storage_config(
+        variables: &HashMap<String, String>,
+    ) -> Result<StorageConfig, ConfigError> {
         let storage_type = variables
             .get("STORAGE__TYPE")
             .ok_or_else(|| ConfigError::MissingVar("STORAGE__TYPE".into()))?;

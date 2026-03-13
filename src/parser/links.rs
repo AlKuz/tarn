@@ -25,7 +25,7 @@ static WIKILINK_RE: LazyLock<Regex> = LazyLock::new(|| {
 // Captures: md_embed, md_text, md_url, md_title
 static MD_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?P<md_embed>!?)\[(?P<md_text>[^\]]*)]\((?P<md_url>[^)\s]+)(?:\s+"(?P<md_title>[^"]*)")?\)"#,
+        r#"(?P<md_embed>!?)\[(?P<md_text>[^]]*)](\((?P<md_url>[^)\s]+)(?:\s+"(?P<md_title>[^"]*)")?\))"#,
     )
     .expect("valid markdown link regex")
 });
@@ -108,7 +108,9 @@ impl WikiLink {
         Self {
             is_embed: &caps["wiki_embed"] == "!",
             target: caps["wiki_target"].to_string(),
-            heading: caps.name("wiki_heading").and_then(|m| non_empty(m.as_str())),
+            heading: caps
+                .name("wiki_heading")
+                .and_then(|m| non_empty(m.as_str())),
             block_ref: caps.name("wiki_block").and_then(|m| non_empty(m.as_str())),
             alias: caps.name("wiki_alias").and_then(|m| non_empty(m.as_str())),
         }
@@ -263,7 +265,7 @@ mod tests {
     fn from_str_wikilink_variants() {
         let link: Link = "[[note]]".parse().unwrap();
         assert!(
-            matches!(link, Link::Wiki(WikiLink { target, alias: None, heading: None, block_ref: None, is_embed: false }) if target == "note")
+            matches!(link, Link::Wiki(ref w) if w.target == "note" && w.alias.is_none() && w.heading.is_none() && w.block_ref.is_none() && !w.is_embed)
         );
 
         let link: Link = "[[note|alias]]".parse().unwrap();
@@ -287,7 +289,9 @@ mod tests {
         );
 
         let link: Link = "![[embed]]".parse().unwrap();
-        assert!(matches!(link, Link::Wiki(WikiLink { target, is_embed: true, .. }) if target == "embed"));
+        assert!(
+            matches!(link, Link::Wiki(WikiLink { target, is_embed: true, .. }) if target == "embed")
+        );
     }
 
     #[test]
@@ -295,10 +299,12 @@ mod tests {
         let link: Link = "[[note#heading#^block]]".parse().unwrap();
         assert!(matches!(
             link,
-            Link::Wiki(WikiLink { target, heading, block_ref, alias: None, is_embed: false })
-                if target == "note"
-                    && heading.as_deref() == Some("heading")
-                    && block_ref.as_deref() == Some("block")
+            Link::Wiki(ref w)
+                if w.target == "note"
+                    && w.heading.as_deref() == Some("heading")
+                    && w.block_ref.as_deref() == Some("block")
+                    && w.alias.is_none()
+                    && !w.is_embed
         ));
 
         // With alias
@@ -316,8 +322,12 @@ mod tests {
         let link: Link = "[[note#^block]]".parse().unwrap();
         assert!(matches!(
             link,
-            Link::Wiki(WikiLink { target, heading: None, block_ref, alias: None, is_embed: false })
-                if target == "note" && block_ref.as_deref() == Some("block")
+            Link::Wiki(ref w)
+                if w.target == "note"
+                    && w.heading.is_none()
+                    && w.block_ref.as_deref() == Some("block")
+                    && w.alias.is_none()
+                    && !w.is_embed
         ));
     }
 
@@ -325,7 +335,7 @@ mod tests {
     fn from_str_markdown() {
         let link: Link = "[text](./path.md)".parse().unwrap();
         assert!(
-            matches!(link, Link::Markdown(MarkdownLink { text, url, title: None, is_embed: false }) if text == "text" && url == "./path.md")
+            matches!(link, Link::Markdown(ref m) if m.text == "text" && m.url == "./path.md" && m.title.is_none() && !m.is_embed)
         );
 
         let link: Link = r#"[text](./path.md "a title")"#.parse().unwrap();
@@ -345,7 +355,9 @@ mod tests {
         assert!(matches!(link, Link::Url(UrlLink { url }) if url == "https://example.com"));
 
         let link: Link = "<user@example.com>".parse().unwrap();
-        assert!(matches!(link, Link::Email(EmailLink { address }) if address == "user@example.com"));
+        assert!(
+            matches!(link, Link::Email(EmailLink { address }) if address == "user@example.com")
+        );
     }
 
     #[test]
@@ -431,8 +443,12 @@ mod tests {
 
         assert_eq!(links.len(), 3);
         assert!(matches!(&links[0], Link::Wiki(WikiLink { target, .. }) if target == "wiki"));
-        assert!(matches!(&links[1], Link::Markdown(MarkdownLink { url, .. }) if url == "./other.md"));
-        assert!(matches!(&links[2], Link::Markdown(MarkdownLink { url, .. }) if url == "https://google.com"));
+        assert!(
+            matches!(&links[1], Link::Markdown(MarkdownLink { url, .. }) if url == "./other.md")
+        );
+        assert!(
+            matches!(&links[2], Link::Markdown(MarkdownLink { url, .. }) if url == "https://google.com")
+        );
     }
 
     #[test]
@@ -441,7 +457,7 @@ mod tests {
         let links = Link::extract(content);
 
         assert_eq!(links.len(), 5);
-        assert!(matches!(&links[0], Link::Wiki(WikiLink { target, alias: None, .. }) if target == "note"));
+        assert!(matches!(&links[0], Link::Wiki(w) if w.target == "note" && w.alias.is_none()));
         assert!(
             matches!(&links[1], Link::Wiki(WikiLink { target, alias, .. }) if target == "note" && alias.as_deref() == Some("alias"))
         );
@@ -455,5 +471,4 @@ mod tests {
             matches!(&links[4], Link::Wiki(WikiLink { target, heading, alias, .. }) if target == "note" && heading.as_deref() == Some("heading") && alias.as_deref() == Some("alias"))
         );
     }
-
 }

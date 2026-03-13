@@ -159,5 +159,4 @@ Content two.
         assert_eq!(headings[1].text, "Second");
         assert!(headings[1].offset > headings[0].offset);
     }
-
 }

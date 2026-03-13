@@ -1,9 +1,4 @@
-use rmcp::{
-    handler::server::wrapper::Parameters,
-    model::CallToolResult,
-    tool,
-    tool_router,
-};
+use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use schemars::JsonSchema;
 
 use super::TarnMcpServer;
@@ -18,7 +13,9 @@ pub struct ReadNoteParams {
     pub include_frontmatter: Option<bool>,
     #[schemars(description = "Include extracted links (default: false)")]
     pub include_links: Option<bool>,
-    #[schemars(description = "Return heading outline + word counts instead of full content (default: false)")]
+    #[schemars(
+        description = "Return heading outline + word counts instead of full content (default: false)"
+    )]
     pub summary: Option<bool>,
 }
 
@@ -62,7 +59,9 @@ pub struct GetTagsParams {
 
 #[tool_router(vis = "pub(crate)")]
 impl TarnMcpServer {
-    #[tool(description = "Read note content with control over detail level. Supports fragment retrieval by section headings and summary mode (heading outline + word counts).")]
+    #[tool(
+        description = "Read note content with control over detail level. Supports fragment retrieval by section headings and summary mode (heading outline + word counts)."
+    )]
     async fn tarn_read_note(
         &self,
         Parameters(params): Parameters<ReadNoteParams>,
@@ -82,7 +81,9 @@ impl TarnMcpServer {
             Ok(response) => {
                 let json = serde_json::to_string_pretty(&response)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(json)]))
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    json,
+                )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
                 e.to_string(),
@@ -90,7 +91,9 @@ impl TarnMcpServer {
         }
     }
 
-    #[tool(description = "Search across the vault using case-insensitive text matching. Returns matching notes with snippets showing context around matches.")]
+    #[tool(
+        description = "Search across the vault using case-insensitive text matching. Returns matching notes with snippets showing context around matches."
+    )]
     async fn tarn_search_notes(
         &self,
         Parameters(params): Parameters<SearchNotesParams>,
@@ -110,7 +113,9 @@ impl TarnMcpServer {
             Ok(response) => {
                 let json = serde_json::to_string_pretty(&response)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(json)]))
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    json,
+                )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
                 e.to_string(),
@@ -118,7 +123,9 @@ impl TarnMcpServer {
         }
     }
 
-    #[tool(description = "List notes in a folder with optional filtering by tags. Supports pagination and sorting.")]
+    #[tool(
+        description = "List notes in a folder with optional filtering by tags. Supports pagination and sorting."
+    )]
     async fn tarn_list_notes(
         &self,
         Parameters(params): Parameters<ListNotesParams>,
@@ -139,7 +146,9 @@ impl TarnMcpServer {
             Ok(response) => {
                 let json = serde_json::to_string_pretty(&response)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(json)]))
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    json,
+                )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
                 e.to_string(),
@@ -147,7 +156,9 @@ impl TarnMcpServer {
         }
     }
 
-    #[tool(description = "Get tag hierarchy with usage statistics. Shows parent-child relationships and optionally lists which notes use each tag.")]
+    #[tool(
+        description = "Get tag hierarchy with usage statistics. Shows parent-child relationships and optionally lists which notes use each tag."
+    )]
     async fn tarn_get_tags(
         &self,
         Parameters(params): Parameters<GetTagsParams>,
@@ -164,7 +175,9 @@ impl TarnMcpServer {
             Ok(response) => {
                 let json = serde_json::to_string_pretty(&response)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(json)]))
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    json,
+                )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
                 e.to_string(),

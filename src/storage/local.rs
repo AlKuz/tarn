@@ -21,7 +21,10 @@ fn is_path_safe(root: &Path, resolved: &Path) -> bool {
     resolved.starts_with(root)
 }
 
-fn revision_token(path: &Path, metadata: &std::fs::Metadata) -> Result<RevisionToken, StorageError> {
+fn revision_token(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<RevisionToken, StorageError> {
     let modified = metadata
         .modified()
         .map_err(|e| StorageError::Io(path.to_path_buf(), e))?;

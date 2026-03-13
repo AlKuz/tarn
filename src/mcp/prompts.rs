@@ -45,12 +45,9 @@ impl TarnMcpServer {
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
         match name {
             "tarn_explore_topic" => {
-                let topic = args
-                    .get("topic")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        rmcp::ErrorData::invalid_params("missing required argument: topic", None)
-                    })?;
+                let topic = args.get("topic").and_then(|v| v.as_str()).ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("missing required argument: topic", None)
+                })?;
                 let folder_context = args
                     .get("folder")
                     .and_then(|v| v.as_str())
@@ -77,29 +74,20 @@ impl TarnMcpServer {
                     .with_description(format!("Explore topic: {topic}")))
             }
             "tarn_summarize_project" => {
-                let folder = args
-                    .get("folder")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        rmcp::ErrorData::invalid_params("missing required argument: folder", None)
-                    })?;
+                let folder = args.get("folder").and_then(|v| v.as_str()).ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("missing required argument: folder", None)
+                })?;
 
                 let messages = vec![
                     PromptMessage::new_resource_link(
                         PromptMessageRole::User,
-                        RawResource::new(
-                            format!("tarn://vault/info/{folder}"),
-                            "Vault Info",
-                        )
-                        .no_annotation(),
+                        RawResource::new(format!("tarn://vault/info/{folder}"), "Vault Info")
+                            .no_annotation(),
                     ),
                     PromptMessage::new_resource_link(
                         PromptMessageRole::User,
-                        RawResource::new(
-                            format!("tarn://vault/tags/{folder}"),
-                            "Vault Tags",
-                        )
-                        .no_annotation(),
+                        RawResource::new(format!("tarn://vault/tags/{folder}"), "Vault Tags")
+                            .no_annotation(),
                     ),
                     PromptMessage::new_text(
                         PromptMessageRole::User,
