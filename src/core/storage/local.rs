@@ -17,6 +17,10 @@ fn map_io_error(path: &Path, err: std::io::Error) -> StorageError {
     }
 }
 
+fn is_path_safe(root: &Path, resolved: &Path) -> bool {
+    resolved.starts_with(root)
+}
+
 fn revision_token(path: &Path, metadata: &std::fs::Metadata) -> Result<RevisionToken, StorageError> {
     let modified = metadata
         .modified()
@@ -28,9 +32,9 @@ fn revision_token(path: &Path, metadata: &std::fs::Metadata) -> Result<RevisionT
     Ok(format!("{}:{}", duration.as_nanos(), file_size).into())
 }
 
-fn try_revision_token(root: &Path, path: &Path) -> Option<RevisionToken> {
+async fn try_revision_token(root: &Path, path: &Path) -> Option<RevisionToken> {
     let full = root.join(path);
-    let meta = std::fs::metadata(&full).ok()?;
+    let meta = fs::metadata(&full).await.ok()?;
     revision_token(path, &meta).ok()
 }
 
@@ -57,8 +61,12 @@ impl LocalStorage {
         LocalStorage { path }
     }
 
-    fn resolve(&self, path: &Path) -> PathBuf {
-        self.path.join(path)
+    fn resolve(&self, path: &Path) -> Result<PathBuf, StorageError> {
+        let full = self.path.join(path);
+        if !is_path_safe(&self.path, &full) {
+            return Err(StorageError::PermissionDenied(path.to_path_buf()));
+        }
+        Ok(full)
     }
 
     fn is_image(&self, ext: &str) -> bool {
@@ -73,7 +81,7 @@ impl LocalStorage {
         path: &Path,
         expected: &RevisionToken,
     ) -> Result<(), StorageError> {
-        let full_path = self.resolve(path);
+        let full_path = self.resolve(path)?;
         let metadata = fs::metadata(&full_path)
             .await
             .map_err(|e| map_io_error(path, e))?;
@@ -112,7 +120,7 @@ impl Storage for LocalStorage {
     }
 
     async fn read(&self, path: PathBuf) -> Result<FileContent, StorageError> {
-        let full_path = self.resolve(&path);
+        let full_path = self.resolve(&path)?;
         let metadata = fs::metadata(&full_path)
             .await
             .map_err(|e| map_io_error(&path, e))?;
@@ -138,9 +146,9 @@ impl Storage for LocalStorage {
     }
 
     async fn write(&self, path: PathBuf, data: FileContent) -> Result<RevisionToken, StorageError> {
-        let full_path = self.resolve(&path);
+        let full_path = self.resolve(&path)?;
 
-        if full_path.exists() {
+        if fs::try_exists(&full_path).await.unwrap_or(false) {
             let expected = match &data {
                 FileContent::Markdown { token, .. } => token,
                 FileContent::Image { token, .. } => token,
@@ -185,7 +193,7 @@ impl Storage for LocalStorage {
     ) -> Result<(), StorageError> {
         self.check_revision(&path, &expected_token).await?;
 
-        let full_path = self.resolve(&path);
+        let full_path = self.resolve(&path)?;
         fs::remove_file(&full_path)
             .await
             .map_err(|e| map_io_error(&path, e))
@@ -199,8 +207,8 @@ impl Storage for LocalStorage {
     ) -> Result<(), StorageError> {
         self.check_revision(&from, &expected_token).await?;
 
-        let full_from = self.resolve(&from);
-        let full_to = self.resolve(&to);
+        let full_from = self.resolve(&from)?;
+        let full_to = self.resolve(&to)?;
 
         if let Some(parent) = full_to.parent() {
             fs::create_dir_all(parent)
@@ -214,8 +222,8 @@ impl Storage for LocalStorage {
     }
 
     async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<RevisionToken, StorageError> {
-        let full_from = self.resolve(&from);
-        let full_to = self.resolve(&to);
+        let full_from = self.resolve(&from)?;
+        let full_to = self.resolve(&to)?;
 
         if let Some(parent) = full_to.parent() {
             fs::create_dir_all(parent)
@@ -234,8 +242,10 @@ impl Storage for LocalStorage {
     }
 
     async fn is_exists(&self, path: PathBuf) -> Result<bool, StorageError> {
-        let full_path = self.resolve(&path);
-        Ok(full_path.exists())
+        let full_path = self.resolve(&path)?;
+        fs::try_exists(&full_path)
+            .await
+            .map_err(|e| map_io_error(&path, e))
     }
 }
 
@@ -275,14 +285,14 @@ impl StorageEventListener for LocalStorage {
                 match event.kind {
                     EventKind::Create(_) => {
                         for path in paths {
-                            if let Some(token) = try_revision_token(&root, &path) {
+                            if let Some(token) = try_revision_token(&root, &path).await {
                                 yield StorageEvent::Created { path, token };
                             }
                         }
                     }
                     EventKind::Modify(_) => {
                         for path in paths {
-                            if let Some(token) = try_revision_token(&root, &path) {
+                            if let Some(token) = try_revision_token(&root, &path).await {
                                 yield StorageEvent::Updated { path, token };
                             }
                         }

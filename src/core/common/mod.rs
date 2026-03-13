@@ -2,7 +2,7 @@ mod data_uri;
 
 pub use data_uri::DataURI;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RevisionToken(String);
 
 impl<T: Into<String>> From<T> for RevisionToken {
