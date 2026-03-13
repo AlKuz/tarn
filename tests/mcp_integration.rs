@@ -10,8 +10,8 @@ use std::sync::Arc;
 use rmcp::model::{JsonObject, ResourceContents};
 use serde_json::Value;
 
-use tarn::mcp::TarnMcpServer;
 use tarn::TarnBuilder;
+use tarn::mcp::TarnMcpServer;
 
 fn vault_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vault")
@@ -46,7 +46,10 @@ mod resources_vault_info {
     async fn reads_vault_info() {
         let server = create_server();
 
-        let result = server.read_resource_by_uri("tarn://vault/info").await.unwrap();
+        let result = server
+            .read_resource_by_uri("tarn://vault/info")
+            .await
+            .unwrap();
         let info = parse_resource_result(&result);
 
         assert_eq!(info["name"], "vault");
@@ -217,10 +220,12 @@ mod resources_note {
         let note = parse_resource_result(&result);
 
         assert_eq!(note["title"], "WebApp");
-        assert!(note["frontmatter"]["tags"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("project".to_string())));
+        assert!(
+            note["frontmatter"]["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("project".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -360,7 +365,12 @@ mod workflow_research_topic {
             .unwrap();
 
         assert_eq!(note.title, Some("Rust".to_string()));
-        assert!(note.frontmatter.unwrap().tags.contains(&"programming/rust".to_string()));
+        assert!(
+            note.frontmatter
+                .unwrap()
+                .tags
+                .contains(&"programming/rust".to_string())
+        );
 
         // Agent finds links to follow
         let links = note.links.unwrap();
@@ -379,9 +389,7 @@ mod workflow_research_topic {
             .unwrap();
 
         let links = rust.links.unwrap();
-        let webapp_link = links
-            .iter()
-            .find(|l| l.target.contains("WebApp"));
+        let webapp_link = links.iter().find(|l| l.target.contains("WebApp"));
         assert!(webapp_link.is_some());
 
         // Follow link to WebApp
@@ -391,7 +399,13 @@ mod workflow_research_topic {
             .unwrap();
 
         assert_eq!(webapp.title, Some("WebApp".to_string()));
-        assert!(webapp.frontmatter.unwrap().tags.contains(&"project".to_string()));
+        assert!(
+            webapp
+                .frontmatter
+                .unwrap()
+                .tags
+                .contains(&"project".to_string())
+        );
     }
 
     #[tokio::test]
@@ -561,8 +575,8 @@ mod workflow_tag_navigation {
         let tags = core.get_tags(Some("programming"), false).await.unwrap();
 
         let tag_names: Vec<&str> = tags.tags.iter().map(|t| t.tag.as_str()).collect();
-        assert!(tag_names.iter().any(|t| *t == "programming/rust"));
-        assert!(tag_names.iter().any(|t| *t == "programming/web"));
+        assert!(tag_names.contains(&"programming/rust"));
+        assert!(tag_names.contains(&"programming/web"));
     }
 
     #[tokio::test]
@@ -639,11 +653,12 @@ mod workflow_full_session {
         assert!(http.content.is_none()); // Summary mode
 
         // Step 6: Agent explores programming/web tag
-        let tags = core
-            .get_tags(Some("programming/web"), true)
-            .await
+        let tags = core.get_tags(Some("programming/web"), true).await.unwrap();
+        let web_tag = tags
+            .tags
+            .iter()
+            .find(|t| t.tag == "programming/web")
             .unwrap();
-        let web_tag = tags.tags.iter().find(|t| t.tag == "programming/web").unwrap();
         assert!(web_tag.count >= 2);
     }
 
@@ -873,11 +888,13 @@ mod nested_folders {
         let note = parse_resource_result(&result);
 
         assert_eq!(note["title"], "Fitness Plan");
-        assert!(note["tags"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t == "health"));
+        assert!(
+            note["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "health")
+        );
     }
 
     #[tokio::test]
@@ -891,11 +908,13 @@ mod nested_folders {
         let note = parse_resource_result(&result);
 
         assert_eq!(note["title"], "API Design");
-        assert!(note["tags"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t == "project/webapp"));
+        assert!(
+            note["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "project/webapp")
+        );
     }
 
     #[tokio::test]
@@ -1001,7 +1020,7 @@ mod nested_folders {
             .collect();
 
         // Should have project/webapp tag from nested notes
-        assert!(tag_names.iter().any(|t| *t == "project/webapp"));
+        assert!(tag_names.contains(&"project/webapp"));
     }
 
     #[tokio::test]

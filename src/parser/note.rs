@@ -131,8 +131,8 @@ fn derive_title(frontmatter: &Frontmatter, sections: &[Section]) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::parser::frontmatter::FrontmatterValue;
-    use crate::core::parser::links::WikiLink;
+    use crate::parser::frontmatter::FrontmatterValue;
+    use crate::parser::links::WikiLink;
 
     #[test]
     fn parse_note_with_frontmatter() {

@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, ValueEnum};
+use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::local::{LocalSessionManager, SessionConfig},
 };
-use rmcp::ServiceExt;
 
 use tarn::TarnBuilder;
 use tarn::mcp::TarnMcpServer;

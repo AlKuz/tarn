@@ -1,16 +1,12 @@
-mod tools;
-mod resources;
 mod prompts;
+mod resources;
+mod tools;
 
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler,
-    handler::server::router::tool::ToolRouter,
-    model::*,
-    service::RequestContext,
-    tool_handler,
-    RoleServer,
+    RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
+    service::RequestContext, tool_handler,
 };
 
 use crate::core::builder::TarnCore;
@@ -84,9 +80,6 @@ impl ServerHandler for TarnMcpServer {
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, rmcp::ErrorData> {
-        self.get_prompt_by_name(
-            &request.name,
-            &request.arguments.unwrap_or_default(),
-        )
+        self.get_prompt_by_name(&request.name, &request.arguments.unwrap_or_default())
     }
 }
