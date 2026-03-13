@@ -132,17 +132,59 @@ src/
 ## Development
 
 ```bash
-# Run tests
-cargo test
-
-# Run with debug logging
-tarn-mcp --vault ~/Obsidian/Test --log-level debug
-
-# Check for issues
-cargo clippy
+make help              # Show all available commands
 ```
 
-See [`docs/development-plan.md`](./docs/development-plan.md) for planned features and optimizations.
+### Build
+
+```bash
+make build             # Debug build
+make build cmd=release # Release build
+make build cmd=check   # Type-check only
+```
+
+### Test
+
+```bash
+make test                    # Run all tests
+make test cmd=unit           # Unit tests only
+make test cmd=integration    # Integration tests only
+make test cmd=verbose        # Tests with output
+```
+
+### Lint & Format
+
+```bash
+make lint              # Check formatting and run clippy
+make lint cmd=fix      # Auto-fix issues
+make lint cmd=fmt      # Format code only
+```
+
+### Coverage
+
+Requires `cargo-llvm-cov` or `cargo-tarpaulin`:
+
+```bash
+cargo install cargo-llvm-cov   # Install coverage tool
+
+make coverage              # Text output
+make coverage cmd=html     # HTML report (coverage/html/index.html)
+make coverage cmd=lcov     # LCOV for CI integration
+make coverage cmd=tarpaulin # Alternative using tarpaulin
+```
+
+### CI
+
+```bash
+make ci                # Full pipeline (lint, test, release build)
+make ci cmd=quick      # Quick check (no release build)
+```
+
+### Debug
+
+```bash
+tarn-mcp --vault ~/Obsidian/Test --log-level debug
+```
 
 ## License
 

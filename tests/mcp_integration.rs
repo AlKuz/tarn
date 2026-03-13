@@ -66,7 +66,8 @@ mod resources_vault_info {
         let info = parse_resource_result(&result);
 
         assert_eq!(info["folder"], "wiki");
-        assert_eq!(info["note_count"].as_u64().unwrap(), 3);
+        // 3 top-level + 3 nested (programming/rust/2 + programming/web/1)
+        assert_eq!(info["note_count"].as_u64().unwrap(), 6);
     }
 
     #[tokio::test]
@@ -818,5 +819,251 @@ mod list_notes {
         for note in &list.notes {
             assert!(note.word_count > 0);
         }
+    }
+}
+
+// =============================================================================
+// Nested Folders
+// =============================================================================
+
+mod nested_folders {
+    use super::*;
+
+    #[tokio::test]
+    async fn lists_nested_folder_structure() {
+        let server = create_server();
+
+        let result = server
+            .read_resource_by_uri("tarn://vault/folders")
+            .await
+            .unwrap();
+        let folders = parse_resource_result(&result);
+
+        let paths: Vec<&str> = folders["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+
+        // Check nested project folders
+        assert!(paths.iter().any(|p| p.contains("webapp/design")));
+        assert!(paths.iter().any(|p| p.contains("webapp/development")));
+        assert!(paths.iter().any(|p| p.contains("webapp/docs")));
+
+        // Check nested wiki folders
+        assert!(paths.iter().any(|p| p.contains("programming/rust")));
+        assert!(paths.iter().any(|p| p.contains("programming/web")));
+
+        // Check nested areas folders
+        assert!(paths.iter().any(|p| p.contains("areas/work")));
+        assert!(paths.iter().any(|p| p.contains("areas/personal")));
+        assert!(paths.iter().any(|p| p.contains("personal/health")));
+    }
+
+    #[tokio::test]
+    async fn reads_deeply_nested_note() {
+        let server = create_server();
+
+        // 3 levels deep: areas/personal/health/Fitness Plan.md
+        let result = server
+            .read_resource_by_uri("tarn://note/areas/personal/health/Fitness Plan.md")
+            .await
+            .unwrap();
+        let note = parse_resource_result(&result);
+
+        assert_eq!(note["title"], "Fitness Plan");
+        assert!(note["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "health"));
+    }
+
+    #[tokio::test]
+    async fn reads_nested_project_note() {
+        let server = create_server();
+
+        let result = server
+            .read_resource_by_uri("tarn://note/projects/webapp/development/API Design.md")
+            .await
+            .unwrap();
+        let note = parse_resource_result(&result);
+
+        assert_eq!(note["title"], "API Design");
+        assert!(note["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "project/webapp"));
+    }
+
+    #[tokio::test]
+    async fn vault_info_scoped_to_nested_folder() {
+        let server = create_server();
+
+        let result = server
+            .read_resource_by_uri("tarn://vault/info/projects/webapp")
+            .await
+            .unwrap();
+        let info = parse_resource_result(&result);
+
+        assert_eq!(info["folder"], "projects/webapp");
+        // Should include notes from all subfolders: design (2) + development (2) + docs (1)
+        assert_eq!(info["note_count"].as_u64().unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn vault_info_deeply_nested() {
+        let server = create_server();
+
+        let result = server
+            .read_resource_by_uri("tarn://vault/info/areas/personal/health")
+            .await
+            .unwrap();
+        let info = parse_resource_result(&result);
+
+        assert_eq!(info["folder"], "areas/personal/health");
+        assert_eq!(info["note_count"].as_u64().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_notes_recursive_in_nested_folder() {
+        let core = create_core();
+
+        // List all notes under projects/webapp recursively
+        let list = core
+            .list_notes(Some("projects/webapp"), true, None, None, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(list.total, 5);
+
+        let paths: Vec<&str> = list.notes.iter().map(|n| n.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.contains("design")));
+        assert!(paths.iter().any(|p| p.contains("development")));
+        assert!(paths.iter().any(|p| p.contains("docs")));
+    }
+
+    #[tokio::test]
+    async fn list_notes_non_recursive_in_nested_folder() {
+        let core = create_core();
+
+        // List only notes directly in projects/webapp/design (not subfolders)
+        let list = core
+            .list_notes(Some("projects/webapp/design"), false, None, None, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(list.total, 2);
+
+        for note in &list.notes {
+            assert!(note.path.starts_with("projects/webapp/design/"));
+            // Should not have additional path segments
+            let remaining = note.path.strip_prefix("projects/webapp/design/").unwrap();
+            assert!(!remaining.contains('/'));
+        }
+    }
+
+    #[tokio::test]
+    async fn search_in_nested_folder() {
+        let core = create_core();
+
+        // Search within nested folder
+        let results = core
+            .search_notes("API", Some("projects/webapp"), None, 100, 0)
+            .await
+            .unwrap();
+
+        assert!(results.total >= 1);
+        for result in &results.results {
+            assert!(result.path.starts_with("projects/webapp/"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tags_scoped_to_nested_folder() {
+        let server = create_server();
+
+        let result = server
+            .read_resource_by_uri("tarn://vault/tags/projects/webapp")
+            .await
+            .unwrap();
+        let tags = parse_resource_result(&result);
+
+        assert_eq!(tags["folder"], "projects/webapp");
+
+        let tag_names: Vec<&str> = tags["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["tag"].as_str().unwrap())
+            .collect();
+
+        // Should have project/webapp tag from nested notes
+        assert!(tag_names.iter().any(|t| *t == "project/webapp"));
+    }
+
+    #[tokio::test]
+    async fn list_wiki_nested_programming_notes() {
+        let core = create_core();
+
+        let list = core
+            .list_notes(Some("wiki/programming"), true, None, None, 100, 0)
+            .await
+            .unwrap();
+
+        // rust (2) + web (1) = 3
+        assert_eq!(list.total, 3);
+
+        let paths: Vec<&str> = list.notes.iter().map(|n| n.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.contains("Async Rust")));
+        assert!(paths.iter().any(|p| p.contains("Error Handling")));
+        assert!(paths.iter().any(|p| p.contains("WebSockets")));
+    }
+
+    #[tokio::test]
+    async fn cross_folder_links_work() {
+        let core = create_core();
+
+        // Read a nested note that links to another nested note
+        let note = core
+            .read_note(
+                "projects/webapp/design/UI Mockups.md",
+                None,
+                false,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let links = note.links.unwrap();
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+
+        // Should link to Color Palette in same folder
+        assert!(targets.iter().any(|t| t.contains("Color Palette")));
+        // Should link to parent WebApp
+        assert!(targets.iter().any(|t| t.contains("WebApp")));
+    }
+
+    #[tokio::test]
+    async fn folders_resource_shows_nested_counts() {
+        let server = create_server();
+
+        let result = server
+            .read_resource_by_uri("tarn://vault/folders/projects")
+            .await
+            .unwrap();
+        let folders = parse_resource_result(&result);
+
+        let folder_list = folders["folders"].as_array().unwrap();
+
+        // Find the design folder and check its count
+        let design = folder_list
+            .iter()
+            .find(|f| f["path"].as_str().unwrap().contains("design"));
+        assert!(design.is_some());
+        assert_eq!(design.unwrap()["note_count"].as_u64().unwrap(), 2);
     }
 }
