@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/AlKuz/tarn/compare/v0.1.3...v0.1.4) (2026-03-13)
+
+
+### Bug Fixes
+
+* add tag_name to upload assets to correct release ([#8](https://github.com/AlKuz/tarn/issues/8)) ([2173273](https://github.com/AlKuz/tarn/commit/2173273c0a9601b9f19353d447d1e55941325088))
+
 ## [0.1.3](https://github.com/AlKuz/tarn/compare/v0.1.2...v0.1.3) (2026-03-13)
 
 
