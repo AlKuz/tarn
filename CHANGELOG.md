@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/AlKuz/tarn/compare/v0.1.2...v0.1.3) (2026-03-13)
+
+
+### Bug Fixes
+
+* run ci only on pr, upload assets to existing release ([#6](https://github.com/AlKuz/tarn/issues/6)) ([7982d49](https://github.com/AlKuz/tarn/commit/7982d496a16aed4896d84e83e43dea561b7e9ef9))
+
 ## [0.1.2](https://github.com/AlKuz/tarn/compare/v0.1.1...v0.1.2) (2026-03-13)
 
 
