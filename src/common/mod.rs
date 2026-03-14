@@ -1,6 +1,8 @@
 mod data_uri;
+mod note_path;
 
 pub use data_uri::DataURI;
+pub use note_path::{NotePath, NotePathError};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RevisionToken(String);
