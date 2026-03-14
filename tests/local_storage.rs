@@ -1,6 +1,5 @@
 //! LocalStorage integration tests focusing on corner cases.
 
-use std::path::PathBuf;
 use std::pin::pin;
 use std::time::Duration;
 
@@ -8,6 +7,7 @@ use tempfile::TempDir;
 use tokio::fs;
 use tokio_stream::StreamExt;
 
+use tarn::common::VaultPath;
 use tarn::storage::{FileContent, LocalStorage, Storage, StorageError};
 
 fn create_temp_storage() -> (TempDir, LocalStorage) {
@@ -24,25 +24,18 @@ mod path_safety {
     use super::*;
 
     #[tokio::test]
-    async fn rejects_absolute_path_escape() {
-        let (_dir, storage) = create_temp_storage();
-
-        // Absolute path that doesn't start with root
-        let result = storage.read(PathBuf::from("/etc/passwd")).await;
-
-        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    async fn rejects_path_traversal() {
+        // VaultPath itself rejects path traversal
+        let result = VaultPath::new("../etc/passwd");
+        assert!(result.is_err());
     }
 
-    // NOTE: Path traversal with ".." is not currently prevented by resolve()
-    // because join() doesn't canonicalize paths. This would require canonicalize()
-    // which has its own edge cases (symlinks, non-existent paths).
-    // The following test documents current behavior (NotFound, not PermissionDenied):
     #[tokio::test]
-    async fn parent_traversal_to_nonexistent_returns_not_found() {
+    async fn read_nonexistent_returns_not_found() {
         let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("nonexistent.md").unwrap();
 
-        // Traversal to non-existent path: resolve() passes, read() fails with NotFound
-        let result = storage.read(PathBuf::from("../nonexistent")).await;
+        let result = storage.read(&path).await;
 
         assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
@@ -58,12 +51,12 @@ mod revision_conflicts {
     #[tokio::test]
     async fn write_with_stale_token_fails() {
         let (dir, storage) = create_temp_storage();
-        let path = PathBuf::from("note.md");
+        let path = VaultPath::new("note.md").unwrap();
 
         // Create initial file
         let token1 = storage
             .write(
-                path.clone(),
+                &path,
                 FileContent::Markdown {
                     content: "v1".to_string(),
                     token: "ignored".into(),
@@ -74,14 +67,14 @@ mod revision_conflicts {
 
         // Modify file externally to change its mtime
         tokio::time::sleep(Duration::from_millis(10)).await;
-        fs::write(dir.path().join(&path), "external change")
+        fs::write(dir.path().join(path.as_str()), "external change")
             .await
             .unwrap();
 
         // Try to write with old token
         let result = storage
             .write(
-                path.clone(),
+                &path,
                 FileContent::Markdown {
                     content: "v2".to_string(),
                     token: token1,
@@ -95,11 +88,11 @@ mod revision_conflicts {
     #[tokio::test]
     async fn delete_with_stale_token_fails() {
         let (dir, storage) = create_temp_storage();
-        let path = PathBuf::from("note.md");
+        let path = VaultPath::new("note.md").unwrap();
 
         let token1 = storage
             .write(
-                path.clone(),
+                &path,
                 FileContent::Markdown {
                     content: "content".to_string(),
                     token: "ignored".into(),
@@ -110,9 +103,11 @@ mod revision_conflicts {
 
         // External modification
         tokio::time::sleep(Duration::from_millis(10)).await;
-        fs::write(dir.path().join(&path), "changed").await.unwrap();
+        fs::write(dir.path().join(path.as_str()), "changed")
+            .await
+            .unwrap();
 
-        let result = storage.delete(path, token1).await;
+        let result = storage.delete(&path, token1).await;
 
         assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
     }
@@ -120,12 +115,12 @@ mod revision_conflicts {
     #[tokio::test]
     async fn rename_with_stale_token_fails() {
         let (dir, storage) = create_temp_storage();
-        let from = PathBuf::from("old.md");
-        let to = PathBuf::from("new.md");
+        let from = VaultPath::new("old.md").unwrap();
+        let to = VaultPath::new("new.md").unwrap();
 
         let token1 = storage
             .write(
-                from.clone(),
+                &from,
                 FileContent::Markdown {
                     content: "content".to_string(),
                     token: "ignored".into(),
@@ -135,9 +130,11 @@ mod revision_conflicts {
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(10)).await;
-        fs::write(dir.path().join(&from), "changed").await.unwrap();
+        fs::write(dir.path().join(from.as_str()), "changed")
+            .await
+            .unwrap();
 
-        let result = storage.rename(from, to, token1).await;
+        let result = storage.rename(&from, &to, token1).await;
 
         assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
     }
@@ -153,11 +150,11 @@ mod directory_creation {
     #[tokio::test]
     async fn write_creates_nested_parents() {
         let (_dir, storage) = create_temp_storage();
-        let path = PathBuf::from("a/b/c/deep.md");
+        let path = VaultPath::new("a/b/c/deep.md").unwrap();
 
         let result = storage
             .write(
-                path.clone(),
+                &path,
                 FileContent::Markdown {
                     content: "deep content".to_string(),
                     token: "ignored".into(),
@@ -166,18 +163,18 @@ mod directory_creation {
             .await;
 
         assert!(result.is_ok());
-        assert!(storage.is_exists(path).await.unwrap());
+        assert!(storage.is_exists(&path).await.unwrap());
     }
 
     #[tokio::test]
     async fn rename_creates_target_parents() {
         let (_dir, storage) = create_temp_storage();
-        let from = PathBuf::from("source.md");
-        let to = PathBuf::from("nested/target.md");
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("nested/target.md").unwrap();
 
         let token = storage
             .write(
-                from.clone(),
+                &from,
                 FileContent::Markdown {
                     content: "content".to_string(),
                     token: "ignored".into(),
@@ -186,24 +183,21 @@ mod directory_creation {
             .await
             .unwrap();
 
-        storage
-            .rename(from.clone(), to.clone(), token)
-            .await
-            .unwrap();
+        storage.rename(&from, &to, token).await.unwrap();
 
-        assert!(!storage.is_exists(from).await.unwrap());
-        assert!(storage.is_exists(to).await.unwrap());
+        assert!(!storage.is_exists(&from).await.unwrap());
+        assert!(storage.is_exists(&to).await.unwrap());
     }
 
     #[tokio::test]
     async fn copy_creates_target_parents() {
         let (_dir, storage) = create_temp_storage();
-        let from = PathBuf::from("source.md");
-        let to = PathBuf::from("deep/nested/copy.md");
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("deep/nested/copy.md").unwrap();
 
         storage
             .write(
-                from.clone(),
+                &from,
                 FileContent::Markdown {
                     content: "content".to_string(),
                     token: "ignored".into(),
@@ -212,11 +206,11 @@ mod directory_creation {
             .await
             .unwrap();
 
-        let result = storage.copy(from.clone(), to.clone()).await;
+        let result = storage.copy(&from, &to).await;
 
         assert!(result.is_ok());
-        assert!(storage.is_exists(from).await.unwrap());
-        assert!(storage.is_exists(to).await.unwrap());
+        assert!(storage.is_exists(&from).await.unwrap());
+        assert!(storage.is_exists(&to).await.unwrap());
     }
 }
 
@@ -230,13 +224,13 @@ mod file_types {
     #[tokio::test]
     async fn file_without_extension_read_as_markdown() {
         let (dir, storage) = create_temp_storage();
-        let path = PathBuf::from("README");
+        let path = VaultPath::new("README").unwrap();
 
-        fs::write(dir.path().join(&path), "# No Extension")
+        fs::write(dir.path().join(path.as_str()), "# No Extension")
             .await
             .unwrap();
 
-        let content = storage.read(path).await.unwrap();
+        let content = storage.read(&path).await.unwrap();
 
         assert!(matches!(content, FileContent::Markdown { .. }));
     }
@@ -244,7 +238,7 @@ mod file_types {
     #[tokio::test]
     async fn png_read_as_image() {
         let (dir, storage) = create_temp_storage();
-        let path = PathBuf::from("image.png");
+        let path = VaultPath::new("image.png").unwrap();
 
         // Minimal valid PNG (1x1 transparent)
         let png_bytes: [u8; 67] = [
@@ -254,9 +248,11 @@ mod file_types {
             0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
             0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
         ];
-        fs::write(dir.path().join(&path), &png_bytes).await.unwrap();
+        fs::write(dir.path().join(path.as_str()), &png_bytes)
+            .await
+            .unwrap();
 
-        let content = storage.read(path).await.unwrap();
+        let content = storage.read(&path).await.unwrap();
 
         match content {
             FileContent::Image { content: uri, .. } => {
@@ -270,11 +266,13 @@ mod file_types {
     #[tokio::test]
     async fn unknown_extension_read_as_markdown() {
         let (dir, storage) = create_temp_storage();
-        let path = PathBuf::from("data.xyz");
+        let path = VaultPath::new("data.xyz").unwrap();
 
-        fs::write(dir.path().join(&path), "some data").await.unwrap();
+        fs::write(dir.path().join(path.as_str()), "some data")
+            .await
+            .unwrap();
 
-        let content = storage.read(path).await.unwrap();
+        let content = storage.read(&path).await.unwrap();
 
         assert!(matches!(content, FileContent::Markdown { .. }));
     }
@@ -290,8 +288,9 @@ mod error_handling {
     #[tokio::test]
     async fn read_missing_file_returns_not_found() {
         let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("nonexistent.md").unwrap();
 
-        let result = storage.read(PathBuf::from("nonexistent.md")).await;
+        let result = storage.read(&path).await;
 
         assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
@@ -299,10 +298,9 @@ mod error_handling {
     #[tokio::test]
     async fn delete_missing_file_returns_not_found() {
         let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("nonexistent.md").unwrap();
 
-        let result = storage
-            .delete(PathBuf::from("nonexistent.md"), "any".into())
-            .await;
+        let result = storage.delete(&path, "any".into()).await;
 
         assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
@@ -310,10 +308,10 @@ mod error_handling {
     #[tokio::test]
     async fn copy_missing_source_returns_not_found() {
         let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("missing.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
 
-        let result = storage
-            .copy(PathBuf::from("missing.md"), PathBuf::from("target.md"))
-            .await;
+        let result = storage.copy(&from, &to).await;
 
         assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
@@ -321,11 +319,9 @@ mod error_handling {
     #[tokio::test]
     async fn is_exists_missing_returns_false_not_error() {
         let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("nonexistent.md").unwrap();
 
-        let exists = storage
-            .is_exists(PathBuf::from("nonexistent.md"))
-            .await
-            .unwrap();
+        let exists = storage.is_exists(&path).await.unwrap();
 
         assert!(!exists);
     }

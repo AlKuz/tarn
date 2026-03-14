@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracing::warn;
 
-use crate::common::RevisionToken;
+use crate::common::{RevisionToken, VaultPath};
 use crate::core::builder::TarnCore;
 use crate::note::{Frontmatter, Link, Note};
 use crate::storage::{FileContent, Storage, StorageError};
@@ -16,9 +15,9 @@ pub enum CoreError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("note not found: {0}")]
-    NoteNotFound(PathBuf),
+    NoteNotFound(VaultPath),
     #[error("not a markdown file: {0}")]
-    NotMarkdown(PathBuf),
+    NotMarkdown(VaultPath),
 }
 
 // --- Response types ---
@@ -143,26 +142,18 @@ pub struct NoteResourceResponse {
 
 // --- Helper functions ---
 
-fn is_markdown(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "md")
-}
-
-fn is_in_folder(path: &Path, folder: Option<&str>) -> bool {
+fn is_in_folder(path: &VaultPath, folder: Option<&str>) -> bool {
     match folder {
         None | Some("") | Some("/") => true,
-        Some(f) => {
-            let f = f.strip_prefix('/').unwrap_or(f);
-            path.starts_with(f)
-        }
+        Some(f) => path.is_under_folder(f),
     }
 }
 
-fn in_folder_non_recursive(path: &Path, folder: Option<&str>) -> bool {
-    let expected_parent = match folder {
-        None | Some("") | Some("/") => Path::new(""),
-        Some(f) => Path::new(f.strip_prefix('/').unwrap_or(f)),
-    };
-    path.parent() == Some(expected_parent)
+fn in_folder_non_recursive(path: &VaultPath, folder: Option<&str>) -> bool {
+    match folder {
+        None | Some("") | Some("/") => path.parent().is_none(),
+        Some(f) => path.is_in_folder(f),
+    }
 }
 
 fn link_to_info(link: &Link) -> LinkInfo {
@@ -229,28 +220,28 @@ fn extract_snippet(content: &str, query: &str, context_chars: usize) -> String {
 // --- TarnCore implementation ---
 
 impl TarnCore {
-    async fn collect_md_files(&self, folder: Option<&str>) -> Result<Vec<PathBuf>, CoreError> {
+    async fn collect_md_files(&self, folder: Option<&str>) -> Result<Vec<VaultPath>, CoreError> {
         let stream = self.storage.list().await?;
         tokio::pin!(stream);
 
         let mut files = Vec::new();
         while let Some(path) = stream.next().await {
-            if is_markdown(&path) && is_in_folder(&path, folder) {
+            if path.is_note() && is_in_folder(&path, folder) {
                 files.push(path);
             }
         }
         Ok(files)
     }
 
-    async fn read_and_parse(&self, path: &Path) -> Result<(Note, RevisionToken), CoreError> {
-        let file = self.storage.read(path.to_path_buf()).await?;
+    async fn read_and_parse(&self, path: &VaultPath) -> Result<(Note, RevisionToken), CoreError> {
+        let file = self.storage.read(path).await?;
         match file {
             FileContent::Markdown { content, token } => {
                 let mut note = Note::from(content.as_str());
-                note.path = Some(path.to_path_buf());
+                note.path = Some(path.clone());
                 Ok((note, token))
             }
-            FileContent::Image { .. } => Err(CoreError::NotMarkdown(path.to_path_buf())),
+            FileContent::Image { .. } => Err(CoreError::NotMarkdown(path.clone())),
         }
     }
 
@@ -262,7 +253,7 @@ impl TarnCore {
         include_links: bool,
         summary: bool,
     ) -> Result<ReadNoteResponse, CoreError> {
-        let file_path = PathBuf::from(path);
+        let file_path: VaultPath = path.try_into().map_err(StorageError::from)?;
         let (note, revision) = self.read_and_parse(&file_path).await?;
 
         let section_summaries: Vec<SectionSummary> = note
@@ -343,7 +334,7 @@ impl TarnCore {
             let (note, _token) = match self.read_and_parse(file_path).await {
                 Ok(result) => result,
                 Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "skipping note in search");
+                    warn!(path = %file_path, error = %e, "skipping note in search");
                     continue;
                 }
             };
@@ -364,7 +355,7 @@ impl TarnCore {
             let snippet = extract_snippet(&full_text, query, 50);
 
             results.push(SearchResult {
-                path: file_path.to_string_lossy().to_string(),
+                path: file_path.to_string(),
                 title: note.title.clone(),
                 snippet,
                 tags,
@@ -391,7 +382,7 @@ impl TarnCore {
 
         let mut files = Vec::new();
         while let Some(path) = stream.next().await {
-            if !is_markdown(&path) {
+            if !path.is_note() {
                 continue;
             }
             if recursive {
@@ -409,7 +400,7 @@ impl TarnCore {
             let (note, _token) = match self.read_and_parse(file_path).await {
                 Ok(result) => result,
                 Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "skipping note in list");
+                    warn!(path = %file_path, error = %e, "skipping note in list");
                     continue;
                 }
             };
@@ -423,7 +414,7 @@ impl TarnCore {
             }
 
             entries.push(NoteListEntry {
-                path: file_path.to_string_lossy().to_string(),
+                path: file_path.to_string(),
                 title: note.title.clone(),
                 tags,
                 word_count: note.word_count(),
@@ -455,12 +446,12 @@ impl TarnCore {
             let (note, _token) = match self.read_and_parse(file_path).await {
                 Ok(result) => result,
                 Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "skipping note in get_tags");
+                    warn!(path = %file_path, error = %e, "skipping note in get_tags");
                     continue;
                 }
             };
 
-            let note_path = file_path.to_string_lossy().to_string();
+            let note_path = file_path.to_string();
             for tag in note.tags() {
                 let entry = tag_map
                     .entry(tag.to_string())
@@ -509,7 +500,7 @@ impl TarnCore {
                     all_tags.extend(note.tags().into_iter().map(String::from));
                 }
                 Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "skipping note in vault_info");
+                    warn!(path = %file_path, error = %e, "skipping note in vault_info");
                 }
             }
         }
@@ -542,7 +533,7 @@ impl TarnCore {
                     }
                 }
                 Err(e) => {
-                    warn!(path = %file_path.display(), error = %e, "skipping note in vault_tags");
+                    warn!(path = %file_path, error = %e, "skipping note in vault_tags");
                 }
             }
         }
@@ -578,14 +569,7 @@ impl TarnCore {
         for file_path in &files {
             let parent = file_path
                 .parent()
-                .map(|p| {
-                    let s = p.to_string_lossy().to_string();
-                    if s.is_empty() {
-                        "/".to_string()
-                    } else {
-                        format!("/{s}")
-                    }
-                })
+                .map(|p| format!("/{p}"))
                 .unwrap_or_else(|| "/".to_string());
             *folder_counts.entry(parent).or_default() += 1;
         }
@@ -604,7 +588,7 @@ impl TarnCore {
     }
 
     pub async fn note_resource(&self, path: &str) -> Result<NoteResourceResponse, CoreError> {
-        let file_path = PathBuf::from(path);
+        let file_path: VaultPath = path.try_into().map_err(StorageError::from)?;
         let (note, revision) = self.read_and_parse(&file_path).await?;
 
         let tags: Vec<String> = note.tags().into_iter().map(String::from).collect();

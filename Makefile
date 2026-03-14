@@ -18,10 +18,9 @@ NC     := \033[0m
 .PHONY: help
 help:
 	@printf "Usage: make <target> [cmd=<subcommand>]\n\n"
-	@printf "$(BLUE)build$(NC)    Build operations (cmd=debug|release)\n"
-	@printf "$(BLUE)test$(NC)     Test operations (cmd=all|unit|integration|verbose)\n"
+	@printf "$(BLUE)build$(NC)    Build operations (cmd=debug|release|check|run)\n"
+	@printf "$(BLUE)test$(NC)     Test operations (cmd=all|unit|integration|verbose|coverage)\n"
 	@printf "$(BLUE)lint$(NC)     Code quality (cmd=check|fix|fmt)\n"
-	@printf "$(BLUE)coverage$(NC) Coverage reports (cmd=text|html|lcov|tarpaulin)\n"
 	@printf "$(BLUE)doc$(NC)      Documentation (cmd=build|open)\n"
 	@printf "$(BLUE)clean$(NC)    Remove build artifacts and coverage reports\n"
 	@printf "$(BLUE)ci$(NC)       CI pipeline (cmd=full|quick)\n\n"
@@ -29,7 +28,7 @@ help:
 	@printf "  make build                  Build in debug mode (default)\n"
 	@printf "  make build cmd=release      Build in release mode\n"
 	@printf "  make test cmd=integration   Run integration tests\n"
-	@printf "  make coverage cmd=html      Generate HTML coverage report\n"
+	@printf "  make test cmd=coverage      Generate HTML coverage report\n"
 
 # ── Build ────────────────────────────────────────────────────────────
 .PHONY: build
@@ -66,12 +65,17 @@ test:
 		verbose) \
 			printf "$(BLUE)→ Running tests with output...$(NC)\n"; \
 			$(CARGO) test -- --nocapture;; \
+		coverage) \
+			printf "$(BLUE)→ Generating HTML coverage report...$(NC)\n"; \
+			mkdir -p coverage; \
+			$(CARGO) llvm-cov --all-features --html --output-dir coverage; \
+			printf "$(GREEN)✓ Report: coverage/html/index.html$(NC)\n";; \
 		""|all) \
 			printf "$(BLUE)→ Running all tests...$(NC)\n"; \
 			$(CARGO) test;; \
 		*) \
 			printf "$(RED)✗ Unknown cmd '$(cmd)'$(NC)\n"; \
-			printf "Commands: all (default), unit, integration, verbose\n"; \
+			printf "Commands: all (default), unit, integration, verbose, coverage\n"; \
 			exit 1;; \
 	esac
 
@@ -93,34 +97,6 @@ lint:
 		*) \
 			printf "$(RED)✗ Unknown cmd '$(cmd)'$(NC)\n"; \
 			printf "Commands: check (default), fix, fmt\n"; \
-			exit 1;; \
-	esac
-
-# ── Coverage ─────────────────────────────────────────────────────────
-.PHONY: coverage
-coverage:
-	@case "$(cmd)" in \
-		html) \
-			printf "$(BLUE)→ Generating HTML coverage report...$(NC)\n"; \
-			mkdir -p coverage; \
-			$(CARGO) llvm-cov --all-features --html --output-dir coverage; \
-			printf "$(GREEN)✓ Report: coverage/html/index.html$(NC)\n";; \
-		lcov) \
-			printf "$(BLUE)→ Generating LCOV coverage report...$(NC)\n"; \
-			mkdir -p coverage; \
-			$(CARGO) llvm-cov --all-features --lcov --output-path coverage/lcov.info; \
-			printf "$(GREEN)✓ Report: coverage/lcov.info$(NC)\n";; \
-		tarpaulin) \
-			printf "$(BLUE)→ Running tarpaulin coverage...$(NC)\n"; \
-			$(CARGO) tarpaulin --config tarpaulin.toml; \
-			printf "$(GREEN)✓ Report: coverage/tarpaulin-report.html$(NC)\n";; \
-		""|text) \
-			printf "$(BLUE)→ Running tests with coverage...$(NC)\n"; \
-			$(CARGO) llvm-cov --all-features; \
-			printf "$(GREEN)✓ Coverage complete$(NC)\n";; \
-		*) \
-			printf "$(RED)✗ Unknown cmd '$(cmd)'$(NC)\n"; \
-			printf "Commands: text (default), html, lcov, tarpaulin\n"; \
 			exit 1;; \
 	esac
 

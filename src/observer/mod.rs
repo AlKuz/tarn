@@ -2,15 +2,15 @@ pub mod local;
 
 pub use local::LocalStorageObserver;
 
-use crate::common::RevisionToken;
+use crate::common::{RevisionToken, VaultPath};
 use futures_core::stream::Stream;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum StorageEvent {
-    Created { path: PathBuf, token: RevisionToken },
-    Updated { path: PathBuf, token: RevisionToken },
-    Deleted { path: PathBuf },
+    Created { path: VaultPath, token: RevisionToken },
+    Updated { path: VaultPath, token: RevisionToken },
+    Deleted { path: VaultPath },
 }
 
 #[derive(Debug, thiserror::Error)]

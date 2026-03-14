@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::path::PathBuf;
 
 use thiserror::Error;
+
+use crate::common::VaultPath;
 
 use super::frontmatter::Frontmatter;
 use super::links::Link;
@@ -19,7 +20,7 @@ pub enum ParseNoteError {
 /// Result of parsing an Obsidian markdown note.
 #[derive(Debug, Clone)]
 pub struct Note {
-    pub path: Option<PathBuf>,
+    pub path: Option<VaultPath>,
     pub title: Option<String>,
     pub frontmatter: Frontmatter,
     pub sections: Vec<Section>,

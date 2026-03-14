@@ -9,6 +9,7 @@ use tokio::fs;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
+use tarn::common::VaultPath;
 use tarn::observer::{LocalStorageObserver, Observer, ObserverError, StorageEvent};
 
 // =============================================================================
@@ -70,7 +71,7 @@ mod events {
 
         match event {
             StorageEvent::Created { path, token } => {
-                assert_eq!(path, PathBuf::from("new.md"));
+                assert_eq!(path, VaultPath::new("new.md").unwrap());
                 assert!(!token.to_string().is_empty());
             }
             other => panic!("expected Created, got {:?}", other),
@@ -104,7 +105,7 @@ mod events {
         match event {
             StorageEvent::Updated { path, .. } | StorageEvent::Created { path, .. } => {
                 // Some filesystems report modify as create
-                assert_eq!(path, PathBuf::from("existing.md"));
+                assert_eq!(path, VaultPath::new("existing.md").unwrap());
             }
             StorageEvent::Deleted { .. } => panic!("unexpected delete event"),
         }
@@ -135,7 +136,7 @@ mod events {
 
         match event {
             StorageEvent::Deleted { path } => {
-                assert_eq!(path, PathBuf::from("to_delete.md"));
+                assert_eq!(path, VaultPath::new("to_delete.md").unwrap());
             }
             other => panic!("expected Deleted, got {:?}", other),
         }
@@ -166,8 +167,9 @@ mod events {
 
         match event {
             StorageEvent::Created { path, .. } => {
-                assert_eq!(path, PathBuf::from("sub/folder/deep.md"));
-                assert!(path.is_relative());
+                assert_eq!(path, VaultPath::new("sub/folder/deep.md").unwrap());
+                // VaultPath always stores relative paths (no leading /)
+                assert!(!path.as_str().starts_with('/'));
             }
             other => panic!("expected Created, got {:?}", other),
         }

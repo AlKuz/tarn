@@ -7,7 +7,7 @@ use tokio::fs;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::common::RevisionToken;
+use crate::common::{RevisionToken, VaultPath};
 use crate::observer::{Observer, ObserverError, StorageEvent};
 
 pub struct LocalStorageObserver {
@@ -22,8 +22,8 @@ impl LocalStorageObserver {
 
 // Local filesystem token: mtime:size
 // Returns None and logs warning if metadata can't be read
-async fn try_revision_token(root: &Path, path: &Path) -> Option<RevisionToken> {
-    let full = root.join(path);
+async fn try_revision_token(root: &Path, path: &VaultPath) -> Option<RevisionToken> {
+    let full = root.join(path.as_str());
     match fs::metadata(&full).await {
         Ok(meta) => {
             let modified = meta.modified().ok()?;
@@ -31,7 +31,7 @@ async fn try_revision_token(root: &Path, path: &Path) -> Option<RevisionToken> {
             Some(format!("{}:{}", duration.as_nanos(), meta.len()).into())
         }
         Err(e) => {
-            warn!("Failed to read metadata for {:?}: {}", path, e);
+            warn!("Failed to read metadata for {}: {}", path, e);
             None
         }
     }
@@ -64,10 +64,11 @@ impl Observer for LocalStorageObserver {
             let _watcher = watcher;
 
             while let Some(event) = rx.recv().await {
-                let paths: Vec<PathBuf> = event
+                let paths: Vec<VaultPath> = event
                     .paths
                     .iter()
-                    .filter_map(|p: &PathBuf| p.strip_prefix(&root).ok().map(|r| r.to_path_buf()))
+                    .filter_map(|p: &PathBuf| p.strip_prefix(&root).ok())
+                    .filter_map(|r| VaultPath::try_from(r).ok())
                     .collect();
 
                 if paths.is_empty() {
