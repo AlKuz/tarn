@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::common::RevisionToken;
 use crate::core::builder::TarnCore;
-use crate::parser::{Frontmatter, Link, Note};
+use crate::note::{Frontmatter, Link, Note};
 use crate::storage::{FileContent, Storage, StorageError};
 
 #[derive(Debug, Error)]
