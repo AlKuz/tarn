@@ -2,12 +2,10 @@ use std::path::{Path, PathBuf};
 
 use async_stream::stream;
 use futures_core::stream::Stream;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::fs;
-use tokio::sync::mpsc;
 
 use crate::common::RevisionToken;
-use crate::storage::{FileContent, Storage, StorageError, StorageEvent, StorageEventListener};
+use crate::storage::{FileContent, Storage, StorageError};
 
 fn map_io_error(path: &Path, err: std::io::Error) -> StorageError {
     match err.kind() {
@@ -35,12 +33,6 @@ fn revision_token(
     Ok(format!("{}:{}", duration.as_nanos(), file_size).into())
 }
 
-async fn try_revision_token(root: &Path, path: &Path) -> Option<RevisionToken> {
-    let full = root.join(path);
-    let meta = fs::metadata(&full).await.ok()?;
-    revision_token(path, &meta).ok()
-}
-
 fn mime_from_extension(ext: &str) -> &'static str {
     match ext {
         "png" => "image/png",
@@ -55,7 +47,7 @@ fn mime_from_extension(ext: &str) -> &'static str {
     }
 }
 
-pub(crate) struct LocalStorage {
+pub struct LocalStorage {
     path: PathBuf,
 }
 
@@ -249,65 +241,5 @@ impl Storage for LocalStorage {
         fs::try_exists(&full_path)
             .await
             .map_err(|e| map_io_error(&path, e))
-    }
-}
-
-impl StorageEventListener for LocalStorage {
-    async fn listen(&self) -> Result<impl Stream<Item = StorageEvent>, StorageError> {
-        let root = self.path.clone();
-        let (tx, mut rx) = mpsc::channel(256);
-
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = res {
-                    let _ = tx.blocking_send(event);
-                }
-            },
-            notify::Config::default(),
-        )
-        .map_err(|e| StorageError::Io(self.path.clone(), std::io::Error::other(e)))?;
-
-        watcher
-            .watch(&self.path, RecursiveMode::Recursive)
-            .map_err(|e| StorageError::Io(self.path.clone(), std::io::Error::other(e)))?;
-
-        Ok(stream! {
-            let _watcher = watcher;
-
-            while let Some(event) = rx.recv().await {
-                let paths: Vec<PathBuf> = event
-                    .paths
-                    .iter()
-                    .filter_map(|p: &PathBuf| p.strip_prefix(&root).ok().map(|r| r.to_path_buf()))
-                    .collect();
-
-                if paths.is_empty() {
-                    continue;
-                }
-
-                match event.kind {
-                    EventKind::Create(_) => {
-                        for path in paths {
-                            if let Some(token) = try_revision_token(&root, &path).await {
-                                yield StorageEvent::Created { path, token };
-                            }
-                        }
-                    }
-                    EventKind::Modify(_) => {
-                        for path in paths {
-                            if let Some(token) = try_revision_token(&root, &path).await {
-                                yield StorageEvent::Updated { path, token };
-                            }
-                        }
-                    }
-                    EventKind::Remove(_) => {
-                        for path in paths {
-                            yield StorageEvent::Deleted { path };
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        })
     }
 }

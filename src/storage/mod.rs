@@ -1,5 +1,7 @@
 pub mod local;
 
+pub use local::LocalStorage;
+
 use crate::common::{DataURI, RevisionToken};
 use futures_core::stream::Stream;
 use std::path::PathBuf;
@@ -29,12 +31,6 @@ pub enum FileContent {
     },
 }
 
-pub enum StorageEvent {
-    Created { path: PathBuf, token: RevisionToken },
-    Updated { path: PathBuf, token: RevisionToken },
-    Deleted { path: PathBuf },
-}
-
 #[allow(async_fn_in_trait)]
 pub trait Storage {
     async fn list(&self) -> Result<impl Stream<Item = PathBuf>, StorageError>;
@@ -53,9 +49,4 @@ pub trait Storage {
     ) -> Result<(), StorageError>;
     async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<RevisionToken, StorageError>;
     async fn is_exists(&self, path: PathBuf) -> Result<bool, StorageError>;
-}
-
-#[allow(async_fn_in_trait)]
-pub trait StorageEventListener {
-    async fn listen(&self) -> Result<impl Stream<Item = StorageEvent>, StorageError>;
 }
