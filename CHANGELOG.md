@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/AlKuz/tarn/compare/v0.1.5...v0.1.6) (2026-03-14)
+
+
+### Bug Fixes
+
+* updated macos version and added linux arm64 target ([#12](https://github.com/AlKuz/tarn/issues/12)) ([f78405c](https://github.com/AlKuz/tarn/commit/f78405ca713238c345292c6c9d428a122f3412bc))
+
 ## [0.1.5](https://github.com/AlKuz/tarn/compare/v0.1.4...v0.1.5) (2026-03-13)
 
 
