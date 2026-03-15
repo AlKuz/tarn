@@ -8,9 +8,17 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum StorageEvent {
-    Created { path: VaultPath, token: RevisionToken },
-    Updated { path: VaultPath, token: RevisionToken },
-    Deleted { path: VaultPath },
+    Created {
+        path: VaultPath,
+        token: RevisionToken,
+    },
+    Updated {
+        path: VaultPath,
+        token: RevisionToken,
+    },
+    Deleted {
+        path: VaultPath,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

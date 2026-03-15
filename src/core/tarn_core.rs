@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -97,11 +98,11 @@ pub struct GetTagsResponse {
 #[derive(Debug, Serialize)]
 pub struct VaultInfo {
     pub name: String,
-    pub folder: String,
+    pub root_path: PathBuf,
+    pub folder: Option<VaultPath>,
     pub note_count: usize,
     pub tag_count: usize,
     pub storage_type: String,
-    pub root_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,19 +114,19 @@ pub struct VaultTagInfo {
 
 #[derive(Debug, Serialize)]
 pub struct VaultTagsResponse {
-    pub folder: String,
+    pub folder: Option<VaultPath>,
     pub tags: Vec<VaultTagInfo>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct FolderInfo {
-    pub path: String,
+    pub path: VaultPath,
     pub note_count: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub struct VaultFoldersResponse {
-    pub folder: String,
+    pub folder: Option<VaultPath>,
     pub folders: Vec<FolderInfo>,
 }
 
@@ -142,16 +143,16 @@ pub struct NoteResourceResponse {
 
 // --- Helper functions ---
 
-fn is_in_folder(path: &VaultPath, folder: Option<&str>) -> bool {
+fn is_in_folder(path: &VaultPath, folder: Option<&VaultPath>) -> bool {
     match folder {
-        None | Some("") | Some("/") => true,
+        None => true,
         Some(f) => path.is_under_folder(f),
     }
 }
 
-fn in_folder_non_recursive(path: &VaultPath, folder: Option<&str>) -> bool {
+fn in_folder_non_recursive(path: &VaultPath, folder: Option<&VaultPath>) -> bool {
     match folder {
-        None | Some("") | Some("/") => path.parent().is_none(),
+        None => path.parent().is_none(),
         Some(f) => path.is_in_folder(f),
     }
 }
@@ -220,7 +221,10 @@ fn extract_snippet(content: &str, query: &str, context_chars: usize) -> String {
 // --- TarnCore implementation ---
 
 impl TarnCore {
-    async fn collect_md_files(&self, folder: Option<&str>) -> Result<Vec<VaultPath>, CoreError> {
+    async fn collect_md_files(
+        &self,
+        folder: Option<&VaultPath>,
+    ) -> Result<Vec<VaultPath>, CoreError> {
         let stream = self.storage.list().await?;
         tokio::pin!(stream);
 
@@ -321,7 +325,7 @@ impl TarnCore {
     pub async fn search_notes(
         &self,
         query: &str,
-        folder: Option<&str>,
+        folder: Option<&VaultPath>,
         tag_filter: Option<&[String]>,
         limit: usize,
         offset: usize,
@@ -370,7 +374,7 @@ impl TarnCore {
 
     pub async fn list_notes(
         &self,
-        folder: Option<&str>,
+        folder: Option<&VaultPath>,
         recursive: bool,
         tag_filter: Option<&[String]>,
         sort: Option<&str>,
@@ -490,7 +494,7 @@ impl TarnCore {
         Ok(GetTagsResponse { tags })
     }
 
-    pub async fn vault_info(&self, folder: Option<&str>) -> Result<VaultInfo, CoreError> {
+    pub async fn vault_info(&self, folder: Option<&VaultPath>) -> Result<VaultInfo, CoreError> {
         let files = self.collect_md_files(folder).await?;
         let mut all_tags = std::collections::HashSet::new();
 
@@ -513,15 +517,18 @@ impl TarnCore {
 
         Ok(VaultInfo {
             name,
-            folder: folder.unwrap_or("/").to_string(),
+            root_path: self.vault_path.clone(),
+            folder: folder.cloned(),
             note_count: files.len(),
             tag_count: all_tags.len(),
             storage_type: "local".to_string(),
-            root_path: self.vault_path.to_string_lossy().to_string(),
         })
     }
 
-    pub async fn vault_tags(&self, folder: Option<&str>) -> Result<VaultTagsResponse, CoreError> {
+    pub async fn vault_tags(
+        &self,
+        folder: Option<&VaultPath>,
+    ) -> Result<VaultTagsResponse, CoreError> {
         let files = self.collect_md_files(folder).await?;
         let mut tag_counts: HashMap<String, usize> = HashMap::new();
 
@@ -554,24 +561,22 @@ impl TarnCore {
         tags.sort_by(|a, b| a.tag.cmp(&b.tag));
 
         Ok(VaultTagsResponse {
-            folder: folder.unwrap_or("/").to_string(),
+            folder: folder.cloned(),
             tags,
         })
     }
 
     pub async fn vault_folders(
         &self,
-        folder: Option<&str>,
+        folder: Option<&VaultPath>,
     ) -> Result<VaultFoldersResponse, CoreError> {
         let files = self.collect_md_files(folder).await?;
-        let mut folder_counts: HashMap<String, usize> = HashMap::new();
+        let mut folder_counts: HashMap<VaultPath, usize> = HashMap::new();
 
         for file_path in &files {
-            let parent = file_path
-                .parent()
-                .map(|p| format!("/{p}"))
-                .unwrap_or_else(|| "/".to_string());
-            *folder_counts.entry(parent).or_default() += 1;
+            if let Some(parent) = file_path.parent() {
+                *folder_counts.entry(parent).or_default() += 1;
+            }
         }
 
         let mut folders: Vec<FolderInfo> = folder_counts
@@ -582,7 +587,7 @@ impl TarnCore {
         folders.sort_by(|a, b| a.path.cmp(&b.path));
 
         Ok(VaultFoldersResponse {
-            folder: folder.unwrap_or("/").to_string(),
+            folder: folder.cloned(),
             folders,
         })
     }

@@ -135,7 +135,11 @@ impl Storage for LocalStorage {
         }
     }
 
-    async fn write(&self, path: &VaultPath, data: FileContent) -> Result<RevisionToken, StorageError> {
+    async fn write(
+        &self,
+        path: &VaultPath,
+        data: FileContent,
+    ) -> Result<RevisionToken, StorageError> {
         let full_path = self.resolve(path)?;
 
         if fs::try_exists(&full_path).await.unwrap_or(false) {

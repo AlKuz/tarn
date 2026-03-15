@@ -11,7 +11,12 @@ use rmcp::model::{JsonObject, ResourceContents};
 use serde_json::Value;
 
 use tarn::TarnBuilder;
+use tarn::common::VaultPath;
 use tarn::mcp::TarnMcpServer;
+
+fn folder(path: &str) -> VaultPath {
+    VaultPath::new(format!("{}/", path)).unwrap()
+}
 
 fn vault_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vault")
@@ -68,7 +73,7 @@ mod resources_vault_info {
             .unwrap();
         let info = parse_resource_result(&result);
 
-        assert_eq!(info["folder"], "wiki");
+        assert_eq!(info["folder"], "wiki/");
         // 3 top-level + 3 nested (programming/rust/2 + programming/web/1)
         assert_eq!(info["note_count"].as_u64().unwrap(), 6);
     }
@@ -83,7 +88,7 @@ mod resources_vault_info {
             .unwrap();
         let info = parse_resource_result(&result);
 
-        assert_eq!(info["folder"], "projects");
+        assert_eq!(info["folder"], "projects/");
         assert!(info["note_count"].as_u64().unwrap() >= 1);
     }
 }
@@ -108,10 +113,10 @@ mod resources_vault_folders {
             .map(|f| f["path"].as_str().unwrap())
             .collect();
 
-        assert!(paths.contains(&"/wiki"));
-        assert!(paths.contains(&"/projects"));
-        assert!(paths.contains(&"/daily"));
-        assert!(paths.contains(&"/templates"));
+        assert!(paths.contains(&"wiki/"));
+        assert!(paths.contains(&"projects/"));
+        assert!(paths.contains(&"daily/"));
+        assert!(paths.contains(&"templates/"));
     }
 
     #[tokio::test]
@@ -128,7 +133,7 @@ mod resources_vault_folders {
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["path"] == "/wiki")
+            .find(|f| f["path"] == "wiki/")
             .unwrap();
         assert_eq!(wiki["note_count"].as_u64().unwrap(), 3);
 
@@ -136,7 +141,7 @@ mod resources_vault_folders {
             .as_array()
             .unwrap()
             .iter()
-            .find(|f| f["path"] == "/daily")
+            .find(|f| f["path"] == "daily/")
             .unwrap();
         assert_eq!(daily["note_count"].as_u64().unwrap(), 2);
     }
@@ -177,7 +182,7 @@ mod resources_vault_tags {
             .unwrap();
         let tags = parse_resource_result(&result);
 
-        assert_eq!(tags["folder"], "wiki");
+        assert_eq!(tags["folder"], "wiki/");
         let tag_names: Vec<&str> = tags["tags"]
             .as_array()
             .unwrap()
@@ -460,7 +465,7 @@ mod workflow_explore_project {
 
         // List project notes
         let list = core
-            .list_notes(Some("projects"), true, None, None, 50, 0)
+            .list_notes(Some(&folder("projects")), true, None, None, 50, 0)
             .await
             .unwrap();
 
@@ -520,7 +525,7 @@ mod workflow_daily_review {
         let core = create_core();
 
         let list = core
-            .list_notes(Some("daily"), true, None, None, 50, 0)
+            .list_notes(Some(&folder("daily")), true, None, None, 50, 0)
             .await
             .unwrap();
 
@@ -694,7 +699,7 @@ mod workflow_full_session {
 
         // Step 4: List all project notes
         let list = core
-            .list_notes(Some("projects"), true, None, None, 50, 0)
+            .list_notes(Some(&folder("projects")), true, None, None, 50, 0)
             .await
             .unwrap();
         assert!(list.total >= 1);
@@ -732,7 +737,7 @@ mod search {
         let core = create_core();
 
         let results = core
-            .search_notes("Rust", Some("wiki"), None, 100, 0)
+            .search_notes("Rust", Some(&folder("wiki")), None, 100, 0)
             .await
             .unwrap();
 
@@ -827,7 +832,7 @@ mod list_notes {
         let core = create_core();
 
         let list = core
-            .list_notes(Some("wiki"), true, None, None, 100, 0)
+            .list_notes(Some(&folder("wiki")), true, None, None, 100, 0)
             .await
             .unwrap();
 
@@ -927,7 +932,7 @@ mod nested_folders {
             .unwrap();
         let info = parse_resource_result(&result);
 
-        assert_eq!(info["folder"], "projects/webapp");
+        assert_eq!(info["folder"], "projects/webapp/");
         // Should include notes from all subfolders: design (2) + development (2) + docs (1)
         assert_eq!(info["note_count"].as_u64().unwrap(), 5);
     }
@@ -942,7 +947,7 @@ mod nested_folders {
             .unwrap();
         let info = parse_resource_result(&result);
 
-        assert_eq!(info["folder"], "areas/personal/health");
+        assert_eq!(info["folder"], "areas/personal/health/");
         assert_eq!(info["note_count"].as_u64().unwrap(), 1);
     }
 
@@ -952,7 +957,7 @@ mod nested_folders {
 
         // List all notes under projects/webapp recursively
         let list = core
-            .list_notes(Some("projects/webapp"), true, None, None, 100, 0)
+            .list_notes(Some(&folder("projects/webapp")), true, None, None, 100, 0)
             .await
             .unwrap();
 
@@ -970,7 +975,14 @@ mod nested_folders {
 
         // List only notes directly in projects/webapp/design (not subfolders)
         let list = core
-            .list_notes(Some("projects/webapp/design"), false, None, None, 100, 0)
+            .list_notes(
+                Some(&folder("projects/webapp/design")),
+                false,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
 
@@ -990,7 +1002,7 @@ mod nested_folders {
 
         // Search within nested folder
         let results = core
-            .search_notes("API", Some("projects/webapp"), None, 100, 0)
+            .search_notes("API", Some(&folder("projects/webapp")), None, 100, 0)
             .await
             .unwrap();
 
@@ -1010,7 +1022,7 @@ mod nested_folders {
             .unwrap();
         let tags = parse_resource_result(&result);
 
-        assert_eq!(tags["folder"], "projects/webapp");
+        assert_eq!(tags["folder"], "projects/webapp/");
 
         let tag_names: Vec<&str> = tags["tags"]
             .as_array()
@@ -1028,7 +1040,7 @@ mod nested_folders {
         let core = create_core();
 
         let list = core
-            .list_notes(Some("wiki/programming"), true, None, None, 100, 0)
+            .list_notes(Some(&folder("wiki/programming")), true, None, None, 100, 0)
             .await
             .unwrap();
 

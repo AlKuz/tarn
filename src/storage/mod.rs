@@ -36,9 +36,16 @@ pub enum FileContent {
 pub trait Storage {
     async fn list(&self) -> Result<impl Stream<Item = VaultPath>, StorageError>;
     async fn read(&self, path: &VaultPath) -> Result<FileContent, StorageError>;
-    async fn write(&self, path: &VaultPath, data: FileContent) -> Result<RevisionToken, StorageError>;
-    async fn delete(&self, path: &VaultPath, expected_token: RevisionToken)
-        -> Result<(), StorageError>;
+    async fn write(
+        &self,
+        path: &VaultPath,
+        data: FileContent,
+    ) -> Result<RevisionToken, StorageError>;
+    async fn delete(
+        &self,
+        path: &VaultPath,
+        expected_token: RevisionToken,
+    ) -> Result<(), StorageError>;
     async fn rename(
         &self,
         from: &VaultPath,

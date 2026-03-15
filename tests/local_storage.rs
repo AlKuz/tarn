@@ -352,7 +352,9 @@ mod listing {
         fs::create_dir_all(dir.path().join("a/b")).await.unwrap();
         fs::write(dir.path().join("root.md"), "").await.unwrap();
         fs::write(dir.path().join("a/level1.md"), "").await.unwrap();
-        fs::write(dir.path().join("a/b/level2.md"), "").await.unwrap();
+        fs::write(dir.path().join("a/b/level2.md"), "")
+            .await
+            .unwrap();
 
         let stream = storage.list().await.unwrap();
         let stream = pin!(stream);

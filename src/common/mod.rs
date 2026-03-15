@@ -2,7 +2,7 @@ mod data_uri;
 mod vault_path;
 
 pub use data_uri::DataURI;
-pub use vault_path::{VaultPath, VaultPathError};
+pub use vault_path::{PathKind, VaultPath, VaultPathError};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RevisionToken(String);
