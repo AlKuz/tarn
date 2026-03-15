@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/AlKuz/tarn/compare/v0.1.6...v0.2.0) (2026-03-15)
+
+
+### Features
+
+* added in-memory index ([#14](https://github.com/AlKuz/tarn/issues/14)) ([734970a](https://github.com/AlKuz/tarn/commit/734970ab42d05e14fb1e62ef446ab628969bc01d))
+
 ## [0.1.6](https://github.com/AlKuz/tarn/compare/v0.1.5...v0.1.6) (2026-03-14)
 
 
