@@ -215,10 +215,11 @@ mod events {
         }
     }
 
-    /// Verifies that root directory events are filtered out.
-    /// Some platforms include the watched root in events; we should skip these.
+    /// Verifies that directory events are filtered out.
+    /// Some platforms emit events for parent directories when files are created;
+    /// we only want file events.
     #[tokio::test]
-    async fn root_directory_events_are_filtered() {
+    async fn directory_events_are_filtered() {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("subdir")).await.unwrap();
 
@@ -228,7 +229,7 @@ mod events {
 
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
-        // Create file in subdirectory - some platforms emit root dir events
+        // Create file in subdirectory - some platforms emit directory events first
         fs::write(dir.path().join("subdir/file.md"), "content")
             .await
             .unwrap();
@@ -238,7 +239,7 @@ mod events {
             .expect("timeout")
             .expect("stream ended");
 
-        // The first event we receive must be for the actual file, not root
+        // The first event we receive must be for the actual file, not a directory
         match event {
             StorageEvent::Created { path, .. } => {
                 assert!(

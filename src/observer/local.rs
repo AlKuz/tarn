@@ -21,11 +21,15 @@ impl LocalStorageObserver {
 }
 
 // Local filesystem token: mtime:size
-// Returns None and logs warning if metadata can't be read
+// Returns None for directories or if metadata can't be read
 async fn try_revision_token(root: &Path, path: &VaultPath) -> Option<RevisionToken> {
     let full = root.join(path.as_str());
     match fs::metadata(&full).await {
         Ok(meta) => {
+            // Skip directories - we only care about file events
+            if meta.is_dir() {
+                return None;
+            }
             let modified = meta.modified().ok()?;
             let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
             Some(format!("{}:{}", duration.as_nanos(), meta.len()).into())
@@ -35,6 +39,12 @@ async fn try_revision_token(root: &Path, path: &VaultPath) -> Option<RevisionTok
             None
         }
     }
+}
+
+// Check if a path looks like a file (has extension) for delete events
+// where we can't check metadata since the file is gone
+fn looks_like_file(path: &VaultPath) -> bool {
+    path.extension().is_some()
 }
 
 impl Observer for LocalStorageObserver {
@@ -93,7 +103,10 @@ impl Observer for LocalStorageObserver {
                     }
                     EventKind::Remove(_) => {
                         for path in paths {
-                            yield StorageEvent::Deleted { path };
+                            // For deletes, we can't check metadata, so use heuristic
+                            if looks_like_file(&path) {
+                                yield StorageEvent::Deleted { path };
+                            }
                         }
                     }
                     _ => {}
