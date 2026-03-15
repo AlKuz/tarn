@@ -452,8 +452,8 @@ mod data_uri {
 
 mod crlf_support {
     use super::*;
-    use tarn::note::Note;
     use tarn::TarnBuilder;
+    use tarn::note::Note;
 
     #[tokio::test]
     async fn reads_file_with_crlf_line_endings() {
