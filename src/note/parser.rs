@@ -233,7 +233,7 @@ Content.
         let note = Note::from("");
         assert_eq!(note.title, None);
         assert_eq!(note.frontmatter, Frontmatter::default());
-        assert_eq!(note.sections.len(), 1);
+        assert_eq!(note.sections.len(), 0); // No sections for empty content
         assert_eq!(note.word_count(), 0);
     }
 
@@ -318,8 +318,48 @@ See also:
 ";
 
         let note = Note::from(content);
-        let output = note.to_string();
 
+        // Verify section structure:
+        // 4 sections total (no empty root section when content starts with heading)
+        assert_eq!(note.sections.len(), 4);
+
+        // Section 0: # Rust Ownership
+        assert_eq!(note.sections[0].heading.as_ref().unwrap().level, 1);
+        assert_eq!(
+            note.sections[0].heading.as_ref().unwrap().text,
+            "Rust Ownership"
+        );
+        assert_eq!(note.sections[0].heading_path, vec!["Rust Ownership"]);
+        assert!(note.sections[0].content.contains("Every value in Rust"));
+
+        // Section 1: ## Borrowing
+        assert_eq!(note.sections[1].heading.as_ref().unwrap().level, 2);
+        assert_eq!(note.sections[1].heading.as_ref().unwrap().text, "Borrowing");
+        assert_eq!(
+            note.sections[1].heading_path,
+            vec!["Rust Ownership", "Borrowing"]
+        );
+        assert!(note.sections[1].tags.contains("borrowing"));
+
+        // Section 2: ## Lifetimes
+        assert_eq!(note.sections[2].heading.as_ref().unwrap().level, 2);
+        assert_eq!(note.sections[2].heading.as_ref().unwrap().text, "Lifetimes");
+        assert_eq!(
+            note.sections[2].heading_path,
+            vec!["Rust Ownership", "Lifetimes"]
+        );
+        assert!(note.sections[2].tags.contains("rust/advanced"));
+        assert!(note.sections[2].tags.contains("lifetime"));
+
+        // Section 3: ## Summary
+        assert_eq!(note.sections[3].heading.as_ref().unwrap().level, 2);
+        assert_eq!(note.sections[3].heading.as_ref().unwrap().text, "Summary");
+        assert_eq!(
+            note.sections[3].heading_path,
+            vec!["Rust Ownership", "Summary"]
+        );
+
+        let output = note.to_string();
         assert_eq!(output, content);
     }
 }

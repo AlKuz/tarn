@@ -3,6 +3,12 @@
 //! The index enables fast queries by AI agents without re-parsing notes on every operation.
 //! It supports multiple backends: InMemoryStore, SqliteStore, DynamoDbStore, PostgresStore.
 
+pub mod in_memory;
+mod tokenizer;
+
+pub use in_memory::{InMemoryIndex, SectionId};
+pub use tokenizer::{NaiveTokenizer, Tokenizer};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -37,7 +43,10 @@ pub struct SearchParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexLink {
     /// Wiki link: `[[target]]` or `[[target|alias]]`
-    Wiki { target: String, alias: Option<String> },
+    Wiki {
+        target: String,
+        alias: Option<String>,
+    },
     /// Markdown link: `[text](url)`
     Markdown { url: String, text: String },
     /// URL autolink: `<https://example.com>`
@@ -77,21 +86,14 @@ pub struct SectionEntry {
 // ---------------------------------------------------------------------------
 
 /// Metadata about the index state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexMeta {
     /// Total number of indexed notes.
     pub note_count: usize,
     /// Timestamp of last indexing operation.
     pub last_indexed: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl Default for IndexMeta {
-    fn default() -> Self {
-        Self {
-            note_count: 0,
-            last_indexed: None,
-        }
-    }
+    /// HuggingFace tokenizer model ID (e.g., "bert-base-uncased").
+    pub tokenizer_id: String,
 }
 
 // ---------------------------------------------------------------------------

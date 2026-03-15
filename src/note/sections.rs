@@ -50,13 +50,15 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
                 offset,
             };
 
-            // Flush previous section
-            let section = build_section(
-                current_heading.take(),
-                current_heading_path.clone(),
-                &current_content,
-            );
-            sections.push(section);
+            // Flush previous section (only if there's content or a heading)
+            if current_heading.is_some() || !current_content.trim().is_empty() {
+                let section = build_section(
+                    current_heading.take(),
+                    current_heading_path.clone(),
+                    &current_content,
+                );
+                sections.push(section);
+            }
 
             // Update heading stack: pop entries at same or deeper level
             while heading_stack
@@ -81,9 +83,11 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
         offset += line.len() + line_ending_len(body, offset + line.len());
     }
 
-    // Flush last section
-    let section = build_section(current_heading, current_heading_path, &current_content);
-    sections.push(section);
+    // Flush last section (only if there's content or a heading)
+    if current_heading.is_some() || !current_content.trim().is_empty() {
+        let section = build_section(current_heading, current_heading_path, &current_content);
+        sections.push(section);
+    }
 
     sections
 }
