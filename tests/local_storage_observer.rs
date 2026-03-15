@@ -198,7 +198,9 @@ mod events {
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Write file through the symlink
-        fs::write(link_path.join("test.md"), "content").await.unwrap();
+        fs::write(link_path.join("test.md"), "content")
+            .await
+            .unwrap();
 
         let event = timeout(Duration::from_secs(EVENT_TIMEOUT_SECS), stream.next())
             .await
