@@ -57,7 +57,7 @@ impl Observer for LocalStorageObserver {
         .map_err(|e| ObserverError::WatchFailed(self.path.clone(), e.to_string()))?;
 
         watcher
-            .watch(&self.path, RecursiveMode::Recursive)
+            .watch(&root, RecursiveMode::Recursive)
             .map_err(|e| ObserverError::WatchFailed(self.path.clone(), e.to_string()))?;
 
         Ok(stream! {
