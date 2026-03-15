@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::path::PathBuf;
 
 use thiserror::Error;
+
+use crate::common::VaultPath;
 
 use super::frontmatter::Frontmatter;
 use super::links::Link;
@@ -19,7 +20,7 @@ pub enum ParseNoteError {
 /// Result of parsing an Obsidian markdown note.
 #[derive(Debug, Clone)]
 pub struct Note {
-    pub path: Option<PathBuf>,
+    pub path: Option<VaultPath>,
     pub title: Option<String>,
     pub frontmatter: Frontmatter,
     pub sections: Vec<Section>,
@@ -131,8 +132,8 @@ fn derive_title(frontmatter: &Frontmatter, sections: &[Section]) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::frontmatter::FrontmatterValue;
-    use crate::parser::links::WikiLink;
+    use crate::note::frontmatter::FrontmatterValue;
+    use crate::note::links::WikiLink;
 
     #[test]
     fn parse_note_with_frontmatter() {
@@ -232,7 +233,7 @@ Content.
         let note = Note::from("");
         assert_eq!(note.title, None);
         assert_eq!(note.frontmatter, Frontmatter::default());
-        assert_eq!(note.sections.len(), 1);
+        assert_eq!(note.sections.len(), 0); // No sections for empty content
         assert_eq!(note.word_count(), 0);
     }
 
@@ -317,8 +318,59 @@ See also:
 ";
 
         let note = Note::from(content);
-        let output = note.to_string();
 
+        // Verify section structure:
+        // 4 sections total (no empty root section when content starts with heading)
+        assert_eq!(note.sections.len(), 4);
+
+        // Section 0: # Rust Ownership
+        assert_eq!(note.sections[0].heading.as_ref().unwrap().level, 1);
+        assert_eq!(
+            note.sections[0].heading.as_ref().unwrap().text,
+            "Rust Ownership"
+        );
+        assert_eq!(note.sections[0].heading_path, vec!["Rust Ownership"]);
+        assert!(note.sections[0].content.contains("Every value in Rust"));
+
+        // Section 1: ## Borrowing
+        assert_eq!(note.sections[1].heading.as_ref().unwrap().level, 2);
+        assert_eq!(note.sections[1].heading.as_ref().unwrap().text, "Borrowing");
+        assert_eq!(
+            note.sections[1].heading_path,
+            vec!["Rust Ownership", "Borrowing"]
+        );
+        assert!(note.sections[1].tags.contains("borrowing"));
+
+        // Section 2: ## Lifetimes
+        assert_eq!(note.sections[2].heading.as_ref().unwrap().level, 2);
+        assert_eq!(note.sections[2].heading.as_ref().unwrap().text, "Lifetimes");
+        assert_eq!(
+            note.sections[2].heading_path,
+            vec!["Rust Ownership", "Lifetimes"]
+        );
+        assert!(note.sections[2].tags.contains("rust/advanced"));
+        assert!(note.sections[2].tags.contains("lifetime"));
+
+        // Section 3: ## Summary
+        assert_eq!(note.sections[3].heading.as_ref().unwrap().level, 2);
+        assert_eq!(note.sections[3].heading.as_ref().unwrap().text, "Summary");
+        assert_eq!(
+            note.sections[3].heading_path,
+            vec!["Rust Ownership", "Summary"]
+        );
+
+        let output = note.to_string();
         assert_eq!(output, content);
+    }
+
+    #[test]
+    fn parses_frontmatter_with_crlf_line_endings() {
+        // Windows-style CRLF line endings
+        let content = "---\r\ntitle: Test\r\ntags:\r\n  - rust\r\n  - windows\r\n---\r\n# Test\r\n\r\nBody content.\r\n";
+        let note = Note::from(content);
+
+        assert_eq!(note.frontmatter.title, Some("Test".to_string()));
+        assert_eq!(note.frontmatter.tags, vec!["rust", "windows"]);
+        assert!(!note.sections.is_empty());
     }
 }

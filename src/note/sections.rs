@@ -21,6 +21,10 @@ pub struct Heading {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
     pub heading: Option<Heading>,
+    /// Full heading path from root to this section.
+    /// Example: `["Project Alpha", "Goals", "Q1"]` for a `## Q1` heading
+    /// under `## Goals` under `# Project Alpha`.
+    pub heading_path: Vec<String>,
     pub content: String,
     pub links: Vec<Link>,
     pub tags: HashSet<String>,
@@ -32,6 +36,9 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
     let mut current_heading: Option<Heading> = None;
     let mut current_content = String::new();
     let mut offset = 0;
+    // Stack of (level, text) for building heading paths
+    let mut heading_stack: Vec<(u8, String)> = Vec::new();
+    let mut current_heading_path: Vec<String> = Vec::new();
 
     for line in body.lines() {
         if let Some(caps) = HEADING_RE.captures(line) {
@@ -39,13 +46,32 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
             let text = caps[2].to_string();
             let heading = Heading {
                 level,
-                text,
+                text: text.clone(),
                 offset,
             };
 
-            // Flush previous section
-            let section = build_section(current_heading.take(), &current_content);
-            sections.push(section);
+            // Flush previous section (only if there's content or a heading)
+            if current_heading.is_some() || !current_content.trim().is_empty() {
+                let section = build_section(
+                    current_heading.take(),
+                    current_heading_path.clone(),
+                    &current_content,
+                );
+                sections.push(section);
+            }
+
+            // Update heading stack: pop entries at same or deeper level
+            while heading_stack
+                .last()
+                .is_some_and(|(stack_level, _)| *stack_level >= level)
+            {
+                heading_stack.pop();
+            }
+            heading_stack.push((level, text.clone()));
+
+            // Build current heading path from stack
+            current_heading_path = heading_stack.iter().map(|(_, t)| t.clone()).collect();
+
             current_heading = Some(heading);
             current_content.clear();
             offset += line.len() + line_ending_len(body, offset + line.len());
@@ -57,9 +83,11 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
         offset += line.len() + line_ending_len(body, offset + line.len());
     }
 
-    // Flush last section
-    let section = build_section(current_heading, &current_content);
-    sections.push(section);
+    // Flush last section (only if there's content or a heading)
+    if current_heading.is_some() || !current_content.trim().is_empty() {
+        let section = build_section(current_heading, current_heading_path, &current_content);
+        sections.push(section);
+    }
 
     sections
 }
@@ -77,13 +105,14 @@ fn line_ending_len(s: &str, pos: usize) -> usize {
     }
 }
 
-fn build_section(heading: Option<Heading>, content: &str) -> Section {
+fn build_section(heading: Option<Heading>, heading_path: Vec<String>, content: &str) -> Section {
     let links = Link::extract(content);
     let tags = extract_inline_tags(content);
     let word_count = content.split_whitespace().count();
 
     Section {
         heading,
+        heading_path,
         content: content.to_string(),
         links,
         tags,
@@ -158,5 +187,65 @@ Content two.
         assert_eq!(headings[0].text, "First");
         assert_eq!(headings[1].text, "Second");
         assert!(headings[1].offset > headings[0].offset);
+    }
+
+    #[test]
+    fn heading_path_builds_hierarchy() {
+        let body = "\
+Intro.
+
+# Project Alpha
+
+Overview.
+
+## Goals
+
+Goal content.
+
+### Q1
+
+Q1 targets.
+
+### Q2
+
+Q2 targets.
+
+## Status
+
+Current status.
+
+# Project Beta
+
+Another project.
+";
+        let sections = parse_sections(body);
+
+        // Intro section: no heading, empty path
+        assert!(sections[0].heading.is_none());
+        assert!(sections[0].heading_path.is_empty());
+
+        // # Project Alpha
+        assert_eq!(sections[1].heading_path, vec!["Project Alpha"]);
+
+        // ## Goals (under Project Alpha)
+        assert_eq!(sections[2].heading_path, vec!["Project Alpha", "Goals"]);
+
+        // ### Q1 (under Goals, under Project Alpha)
+        assert_eq!(
+            sections[3].heading_path,
+            vec!["Project Alpha", "Goals", "Q1"]
+        );
+
+        // ### Q2 (sibling of Q1, under Goals)
+        assert_eq!(
+            sections[4].heading_path,
+            vec!["Project Alpha", "Goals", "Q2"]
+        );
+
+        // ## Status (sibling of Goals, under Project Alpha)
+        assert_eq!(sections[5].heading_path, vec!["Project Alpha", "Status"]);
+
+        // # Project Beta (new top-level)
+        assert_eq!(sections[6].heading_path, vec!["Project Beta"]);
     }
 }

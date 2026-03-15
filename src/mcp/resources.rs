@@ -3,7 +3,19 @@ use rmcp::model::{
     RawResourceTemplate, ReadResourceResult, ResourceContents,
 };
 
+use crate::common::VaultPath;
+
 use super::TarnMcpServer;
+
+fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
+    folder
+        .map(|f| {
+            let normalized = format!("{}/", f.trim_end_matches('/'));
+            VaultPath::new(normalized)
+                .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
+        })
+        .transpose()
+}
 
 impl TarnMcpServer {
     pub fn list_static_resources(&self) -> ListResourcesResult {
@@ -91,9 +103,10 @@ impl TarnMcpServer {
         uri: &str,
         folder: Option<&str>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+        let folder = parse_folder(folder)?;
         let info = self
             .core
-            .vault_info(folder)
+            .vault_info(folder.as_ref())
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -110,9 +123,10 @@ impl TarnMcpServer {
         uri: &str,
         folder: Option<&str>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+        let folder = parse_folder(folder)?;
         let tags = self
             .core
-            .vault_tags(folder)
+            .vault_tags(folder.as_ref())
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
@@ -129,9 +143,10 @@ impl TarnMcpServer {
         uri: &str,
         folder: Option<&str>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+        let folder = parse_folder(folder)?;
         let folders = self
             .core
-            .vault_folders(folder)
+            .vault_folders(folder.as_ref())
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 

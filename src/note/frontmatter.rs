@@ -6,8 +6,10 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-static FRONTMATTER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)\A---\n(.*?)\n---\n?").expect("valid frontmatter regex"));
+static FRONTMATTER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Handle both Unix (\n) and Windows (\r\n) line endings
+    Regex::new(r"(?s)\A---\r?\n(.*?)\r?\n---\r?\n?").expect("valid frontmatter regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -66,7 +68,8 @@ pub(crate) fn split_frontmatter(content: &str) -> (Frontmatter, String) {
         return (Frontmatter::default(), content.to_string());
     };
 
-    let yaml_block = &caps[1];
+    // Normalize CRLF to LF for YAML parsing
+    let yaml_block = caps[1].replace('\r', "");
     let full_match = caps.get(0).unwrap();
     let body = &content[full_match.end()..];
 
@@ -81,7 +84,8 @@ pub(crate) fn try_split_frontmatter(
         return Ok((Frontmatter::default(), content.to_string()));
     };
 
-    let yaml_block = &caps[1];
+    // Normalize CRLF to LF for YAML parsing
+    let yaml_block = caps[1].replace('\r', "");
     let full_match = caps.get(0).unwrap();
     let body = &content[full_match.end()..];
 

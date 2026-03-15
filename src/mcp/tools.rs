@@ -1,7 +1,19 @@
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use schemars::JsonSchema;
 
+use crate::common::VaultPath;
+
 use super::TarnMcpServer;
+
+fn parse_folder(folder: Option<String>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
+    folder
+        .map(|f| {
+            let normalized = format!("{}/", f.trim_end_matches('/'));
+            VaultPath::new(normalized)
+                .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
+        })
+        .transpose()
+}
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct ReadNoteParams {
@@ -98,11 +110,12 @@ impl TarnMcpServer {
         &self,
         Parameters(params): Parameters<SearchNotesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let folder = parse_folder(params.folder)?;
         let result = self
             .core
             .search_notes(
                 &params.query,
-                params.folder.as_deref(),
+                folder.as_ref(),
                 params.tag_filter.as_deref(),
                 params.limit.unwrap_or(20),
                 params.offset.unwrap_or(0),
@@ -130,10 +143,11 @@ impl TarnMcpServer {
         &self,
         Parameters(params): Parameters<ListNotesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let folder = parse_folder(params.folder)?;
         let result = self
             .core
             .list_notes(
-                params.folder.as_deref(),
+                folder.as_ref(),
                 params.recursive.unwrap_or(false),
                 params.tag_filter.as_deref(),
                 params.sort.as_deref(),
