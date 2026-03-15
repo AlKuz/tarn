@@ -69,6 +69,7 @@ impl Observer for LocalStorageObserver {
                     .iter()
                     .filter_map(|p: &PathBuf| p.strip_prefix(&root).ok())
                     .filter_map(|r| VaultPath::try_from(r).ok())
+                    .filter(|p| !p.as_str().is_empty()) // Skip root directory events
                     .collect();
 
                 if paths.is_empty() {

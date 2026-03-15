@@ -174,6 +174,80 @@ mod events {
             other => panic!("expected Created, got {:?}", other),
         }
     }
+
+    /// Verifies that file events through a symlinked path are correctly resolved.
+    /// On macOS, /var is a symlink to /private/var, so watching a symlinked path
+    /// must canonicalize to match the paths returned by the filesystem watcher.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn symlinked_directory_events_work() {
+        use std::os::unix::fs::symlink;
+
+        let real_dir = TempDir::new().unwrap();
+        let link_dir = TempDir::new().unwrap();
+        let link_path = link_dir.path().join("link");
+
+        // Create symlink: link_path -> real_dir
+        symlink(real_dir.path(), &link_path).unwrap();
+
+        // Watch via the symlink
+        let observer = LocalStorageObserver::new(link_path.clone());
+        let stream = observer.observe().await.unwrap();
+        let mut stream = pin!(stream);
+
+        tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
+
+        // Write file through the symlink
+        fs::write(link_path.join("test.md"), "content").await.unwrap();
+
+        let event = timeout(Duration::from_secs(EVENT_TIMEOUT_SECS), stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended");
+
+        match event {
+            StorageEvent::Created { path, .. } => {
+                assert_eq!(path, VaultPath::new("test.md").unwrap());
+            }
+            other => panic!("expected Created, got {:?}", other),
+        }
+    }
+
+    /// Verifies that root directory events are filtered out.
+    /// Some platforms include the watched root in events; we should skip these.
+    #[tokio::test]
+    async fn root_directory_events_are_filtered() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("subdir")).await.unwrap();
+
+        let observer = LocalStorageObserver::new(dir.path().to_path_buf());
+        let stream = observer.observe().await.unwrap();
+        let mut stream = pin!(stream);
+
+        tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
+
+        // Create file in subdirectory - some platforms emit root dir events
+        fs::write(dir.path().join("subdir/file.md"), "content")
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(EVENT_TIMEOUT_SECS), stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended");
+
+        // The first event we receive must be for the actual file, not root
+        match event {
+            StorageEvent::Created { path, .. } => {
+                assert!(
+                    !path.as_str().is_empty(),
+                    "received event for root directory (empty path)"
+                );
+                assert_eq!(path, VaultPath::new("subdir/file.md").unwrap());
+            }
+            other => panic!("expected Created, got {:?}", other),
+        }
+    }
 }
 
 // =============================================================================
