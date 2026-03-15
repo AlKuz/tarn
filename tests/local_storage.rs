@@ -445,3 +445,89 @@ mod data_uri {
         assert_eq!(parsed.to_string(), input);
     }
 }
+
+// =============================================================================
+// Cross-Platform Line Endings (CRLF support for Windows)
+// =============================================================================
+
+mod crlf_support {
+    use super::*;
+    use tarn::note::Note;
+    use tarn::TarnBuilder;
+
+    #[tokio::test]
+    async fn reads_file_with_crlf_line_endings() {
+        let dir = TempDir::new().unwrap();
+
+        // Write file with Windows-style CRLF line endings
+        let content = "---\r\ntitle: Windows Note\r\ntags:\r\n  - windows\r\n  - testing\r\n---\r\n# Hello\r\n\r\nContent here.\r\n";
+        fs::write(dir.path().join("note.md"), content)
+            .await
+            .unwrap();
+
+        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let path = VaultPath::new("note.md").unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        match file {
+            FileContent::Markdown { content, .. } => {
+                let note = Note::from(content.as_str());
+                assert_eq!(note.frontmatter.title, Some("Windows Note".to_string()));
+                assert_eq!(note.frontmatter.tags, vec!["windows", "testing"]);
+            }
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tarn_core_parses_crlf_notes() {
+        let dir = TempDir::new().unwrap();
+
+        // Write multiple files with CRLF
+        fs::write(
+            dir.path().join("rust.md"),
+            "---\r\ntags:\r\n  - programming/rust\r\n---\r\n# Rust\r\n\r\nRust content.\r\n",
+        )
+        .await
+        .unwrap();
+
+        fs::write(
+            dir.path().join("python.md"),
+            "---\r\ntags:\r\n  - programming/python\r\n---\r\n# Python\r\n\r\nPython content.\r\n",
+        )
+        .await
+        .unwrap();
+
+        let core = TarnBuilder::local(dir.path().to_path_buf()).build();
+
+        // Test vault_tags returns correctly parsed tags
+        let tags_response = core.vault_tags(None).await.unwrap();
+        let tag_names: Vec<&str> = tags_response.tags.iter().map(|t| t.tag.as_str()).collect();
+
+        assert!(tag_names.contains(&"programming/rust"));
+        assert!(tag_names.contains(&"programming/python"));
+    }
+
+    #[tokio::test]
+    async fn search_works_with_crlf_content() {
+        let dir = TempDir::new().unwrap();
+
+        fs::write(
+            dir.path().join("searchable.md"),
+            "---\r\ntitle: Searchable\r\n---\r\n# Searchable\r\n\r\nThis note contains uniqueterm123 for testing.\r\n",
+        )
+        .await
+        .unwrap();
+
+        let core = TarnBuilder::local(dir.path().to_path_buf()).build();
+
+        let results = core
+            .search_notes("uniqueterm123", None, None, 10, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(results.total, 1);
+        assert_eq!(results.results[0].title, Some("Searchable".to_string()));
+    }
+}

@@ -362,4 +362,15 @@ See also:
         let output = note.to_string();
         assert_eq!(output, content);
     }
+
+    #[test]
+    fn parses_frontmatter_with_crlf_line_endings() {
+        // Windows-style CRLF line endings
+        let content = "---\r\ntitle: Test\r\ntags:\r\n  - rust\r\n  - windows\r\n---\r\n# Test\r\n\r\nBody content.\r\n";
+        let note = Note::from(content);
+
+        assert_eq!(note.frontmatter.title, Some("Test".to_string()));
+        assert_eq!(note.frontmatter.tags, vec!["rust", "windows"]);
+        assert!(!note.sections.is_empty());
+    }
 }
