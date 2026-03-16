@@ -28,6 +28,8 @@ use futures_core::stream::Stream;
 pub enum StorageError {
     #[error("file not found: {0}")]
     NotFound(VaultPath),
+    #[error("file {0} already exists")]
+    FileAlreadyExists(VaultPath),
     #[error("permission denied: {0}")]
     PermissionDenied(VaultPath),
     #[error("write conflict: {0} (expected: {1}, actual: {2})")]
@@ -40,44 +42,57 @@ pub enum StorageError {
     InvalidPath(#[from] crate::common::VaultPathError),
 }
 
-/// File content with type-specific payload and revision token.
+#[derive(Debug, Clone)]
+pub struct FileMeta {
+    pub path: VaultPath,
+    pub size: u64,
+    pub modified: std::time::SystemTime,
+    pub revision_token: RevisionToken,
+}
+
+#[derive(Debug, Clone)]
 pub enum FileContent {
     /// Markdown note content as UTF-8 string.
-    Markdown {
-        content: String,
-        token: RevisionToken,
-    },
+    Markdown(String),
     /// Image content as a data URI (base64-encoded).
-    Image {
-        content: DataURI,
-        token: RevisionToken,
-    },
+    Image(DataURI),
+}
+
+#[derive(Debug)]
+pub struct File {
+    pub meta: FileMeta,
+    pub content: FileContent,
 }
 
 /// Vault storage backend.
 ///
 /// Implementations must provide async file operations with revision-based
-/// conflict detection. The trait is object-safe for dynamic dispatch.
+/// conflict detection.
 #[allow(async_fn_in_trait)]
 pub trait Storage {
-    async fn list(&self) -> Result<impl Stream<Item = VaultPath>, StorageError>;
-    async fn read(&self, path: &VaultPath) -> Result<FileContent, StorageError>;
+    async fn list(&self) -> Result<impl Stream<Item = FileMeta>, StorageError>;
+    async fn read(&self, path: &VaultPath) -> Result<File, StorageError>;
     async fn write(
         &self,
         path: &VaultPath,
         data: FileContent,
+        expected_token: Option<RevisionToken>,
     ) -> Result<RevisionToken, StorageError>;
     async fn delete(
         &self,
         path: &VaultPath,
         expected_token: RevisionToken,
     ) -> Result<(), StorageError>;
-    async fn rename(
+    async fn r#move(
         &self,
         from: &VaultPath,
         to: &VaultPath,
         expected_token: RevisionToken,
     ) -> Result<(), StorageError>;
     async fn copy(&self, from: &VaultPath, to: &VaultPath) -> Result<RevisionToken, StorageError>;
-    async fn is_exists(&self, path: &VaultPath) -> Result<bool, StorageError>;
+    async fn exists(&self, path: &VaultPath) -> Result<bool, StorageError>;
+    // Update internal state with deny list
+    fn deny_access(&self, paths: &[VaultPath]);
+    // Update internal state with read only access
+    fn read_only_access(&self, paths: &[VaultPath]);
 }
