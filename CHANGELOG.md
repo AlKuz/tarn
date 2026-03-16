@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/AlKuz/tarn/compare/v0.2.0...v0.2.1) (2026-03-16)
+
+
+### Bug Fixes
+
+* small note structures updates and test coverage ([#16](https://github.com/AlKuz/tarn/issues/16)) ([0d0c29f](https://github.com/AlKuz/tarn/commit/0d0c29f725acc636b2c95853e779190257fae1ad))
+
 ## [0.2.0](https://github.com/AlKuz/tarn/compare/v0.1.6...v0.2.0) (2026-03-15)
 
 
