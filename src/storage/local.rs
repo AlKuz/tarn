@@ -35,6 +35,12 @@ fn revision_token(
     Ok(format!("{}:{}", duration.as_nanos(), file_size).into())
 }
 
+/// Returns MIME type for known image extensions.
+///
+/// # Panics
+/// Raise panics if called with an unrecognized extension. This function is only
+/// called when `VaultPath::is_image()` returns true, which uses the same
+/// extension list, making unknown extensions unreachable.
 fn mime_from_extension(ext: &str) -> &'static str {
     match ext {
         "png" => "image/png",
@@ -45,7 +51,7 @@ fn mime_from_extension(ext: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
         "tiff" | "tif" => "image/tiff",
-        _ => "application/octet-stream",
+        _ => unreachable!("is_image() guards against unknown extensions"),
     }
 }
 
@@ -315,5 +321,42 @@ impl Storage for LocalStorage {
         if let Ok(mut guard) = self.read_only_paths.write() {
             *guard = paths.iter().cloned().collect();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn is_path_safe_allows_valid_paths() {
+        let root = Path::new("/vault");
+        assert!(is_path_safe(root, Path::new("/vault/note.md")));
+        assert!(is_path_safe(root, Path::new("/vault/folder/note.md")));
+        assert!(is_path_safe(root, Path::new("/vault/a/b/c/deep.md")));
+    }
+
+    #[test]
+    fn is_path_safe_rejects_paths_outside_root() {
+        let root = Path::new("/vault");
+        assert!(!is_path_safe(root, Path::new("/etc/passwd")));
+        assert!(!is_path_safe(root, Path::new("/other/vault/note.md")));
+        assert!(!is_path_safe(root, Path::new("/home/user/file.md")));
+    }
+
+    #[test]
+    fn is_path_safe_rejects_sibling_with_similar_prefix() {
+        let root = Path::new("/vault");
+        // "/vault-other" starts with "/vault" as a string but is not under /vault/
+        // Path::starts_with does component-level matching, not string prefix
+        assert!(!is_path_safe(root, Path::new("/vault-other/note.md")));
+    }
+
+    #[test]
+    fn is_path_safe_handles_root_itself() {
+        let root = Path::new("/vault");
+        assert!(is_path_safe(root, Path::new("/vault")));
+        assert!(is_path_safe(root, Path::new("/vault/")));
     }
 }
