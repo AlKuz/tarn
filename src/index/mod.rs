@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::common::{RevisionToken, VaultPath};
-use crate::note::Note;
+use crate::note_handler::Note;
 
 // ---------------------------------------------------------------------------
 // Search parameters

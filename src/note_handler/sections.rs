@@ -9,6 +9,33 @@ use super::tags::extract_inline_tags;
 static HEADING_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^(#{1,6})\s+(.+?)(?:\s+#+)?$").expect("valid heading regex"));
 
+static TASK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^[\t ]*- \[(.)]\s*(.*)$").expect("valid task regex"));
+
+/// A task item extracted from a note (checkbox list item).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Task {
+    /// 1-based line number where the task appears.
+    pub line: usize,
+    /// Task completion status.
+    pub status: TaskStatus,
+    /// Task description text (without the checkbox marker).
+    pub text: String,
+}
+
+/// Completion status of a task checkbox.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskStatus {
+    /// Incomplete task: `- [ ]`
+    Open,
+    /// Completed task: `- [x]`
+    Done,
+    /// Cancelled task: `- [-]`
+    Canceled,
+    /// Custom status marker, e.g. `- [>]` for deferred.
+    Custom(char),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heading {
     pub level: u8,
@@ -29,6 +56,7 @@ pub struct Section {
     pub links: Vec<Link>,
     pub tags: HashSet<String>,
     pub word_count: usize,
+    pub tasks: Vec<Task>,
 }
 
 pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
@@ -36,6 +64,8 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
     let mut current_heading: Option<Heading> = None;
     let mut current_content = String::new();
     let mut offset = 0;
+    let mut line_number = 1usize;
+    let mut section_start_line = 1usize;
     // Stack of (level, text) for building heading paths
     let mut heading_stack: Vec<(u8, String)> = Vec::new();
     let mut current_heading_path: Vec<String> = Vec::new();
@@ -56,6 +86,7 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
                     current_heading.take(),
                     current_heading_path.clone(),
                     &current_content,
+                    section_start_line,
                 );
                 sections.push(section);
             }
@@ -74,18 +105,26 @@ pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
 
             current_heading = Some(heading);
             current_content.clear();
+            section_start_line = line_number + 1;
             offset += line.len() + line_ending_len(body, offset + line.len());
+            line_number += 1;
             continue;
         }
 
         current_content.push_str(line);
         current_content.push('\n');
         offset += line.len() + line_ending_len(body, offset + line.len());
+        line_number += 1;
     }
 
     // Flush last section (only if there's content or a heading)
     if current_heading.is_some() || !current_content.trim().is_empty() {
-        let section = build_section(current_heading, current_heading_path, &current_content);
+        let section = build_section(
+            current_heading,
+            current_heading_path,
+            &current_content,
+            section_start_line,
+        );
         sections.push(section);
     }
 
@@ -105,10 +144,16 @@ fn line_ending_len(s: &str, pos: usize) -> usize {
     }
 }
 
-fn build_section(heading: Option<Heading>, heading_path: Vec<String>, content: &str) -> Section {
+fn build_section(
+    heading: Option<Heading>,
+    heading_path: Vec<String>,
+    content: &str,
+    start_line: usize,
+) -> Section {
     let links = Link::extract(content);
     let tags = extract_inline_tags(content);
     let word_count = content.split_whitespace().count();
+    let tasks = extract_tasks(content, start_line);
 
     Section {
         heading,
@@ -117,7 +162,29 @@ fn build_section(heading: Option<Heading>, heading_path: Vec<String>, content: &
         links,
         tags,
         word_count,
+        tasks,
     }
+}
+
+fn extract_tasks(content: &str, start_line: usize) -> Vec<Task> {
+    let mut tasks = Vec::new();
+    for (line_offset, line) in content.lines().enumerate() {
+        if let Some(caps) = TASK_RE.captures(line) {
+            let marker = caps[1].chars().next().unwrap();
+            let status = match marker {
+                ' ' => TaskStatus::Open,
+                'x' | 'X' => TaskStatus::Done,
+                '-' => TaskStatus::Canceled,
+                c => TaskStatus::Custom(c),
+            };
+            tasks.push(Task {
+                line: start_line + line_offset,
+                status,
+                text: caps[2].to_string(),
+            });
+        }
+    }
+    tasks
 }
 
 #[cfg(test)]
@@ -247,5 +314,47 @@ Another project.
 
         // # Project Beta (new top-level)
         assert_eq!(sections[6].heading_path, vec!["Project Beta"]);
+    }
+
+    #[test]
+    fn task_status_cancelled() {
+        // Test - [-] extracts as TaskStatus::Canceled
+        let body = "Some text.\n\n- [-] Cancelled task\n- [ ] Open task\n";
+        let sections = parse_sections(body);
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].tasks.len(), 2);
+
+        assert_eq!(sections[0].tasks[0].status, TaskStatus::Canceled);
+        assert_eq!(sections[0].tasks[0].text, "Cancelled task");
+
+        assert_eq!(sections[0].tasks[1].status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn task_status_custom() {
+        // Test - [>], - [?], etc. extract as TaskStatus::Custom
+        let body = "\
+- [>] Deferred task
+- [?] Question task
+- [!] Important task
+- [x] Completed task
+";
+        let sections = parse_sections(body);
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].tasks.len(), 4);
+
+        assert_eq!(sections[0].tasks[0].status, TaskStatus::Custom('>'));
+        assert_eq!(sections[0].tasks[0].text, "Deferred task");
+
+        assert_eq!(sections[0].tasks[1].status, TaskStatus::Custom('?'));
+        assert_eq!(sections[0].tasks[1].text, "Question task");
+
+        assert_eq!(sections[0].tasks[2].status, TaskStatus::Custom('!'));
+        assert_eq!(sections[0].tasks[2].text, "Important task");
+
+        assert_eq!(sections[0].tasks[3].status, TaskStatus::Done);
+        assert_eq!(sections[0].tasks[3].text, "Completed task");
     }
 }

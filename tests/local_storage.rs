@@ -453,7 +453,7 @@ mod data_uri {
 mod crlf_support {
     use super::*;
     use tarn::TarnBuilder;
-    use tarn::note::Note;
+    use tarn::note_handler::Note;
 
     #[tokio::test]
     async fn reads_file_with_crlf_line_endings() {
@@ -473,8 +473,9 @@ mod crlf_support {
         match file {
             FileContent::Markdown { content, .. } => {
                 let note = Note::from(content.as_str());
-                assert_eq!(note.frontmatter.title, Some("Windows Note".to_string()));
-                assert_eq!(note.frontmatter.tags, vec!["windows", "testing"]);
+                let fm = note.frontmatter.as_ref().expect("should have frontmatter");
+                assert_eq!(fm.title, Some("Windows Note".to_string()));
+                assert_eq!(fm.tags, vec!["windows", "testing"]);
             }
             _ => panic!("expected markdown"),
         }

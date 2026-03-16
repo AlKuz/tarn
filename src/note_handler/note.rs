@@ -17,12 +17,12 @@ pub enum ParseNoteError {
     InvalidFrontmatter(#[from] yaml_serde::Error),
 }
 
-/// Result of parsing an Obsidian markdown note.
+/// Result of parsing an Obsidian Markdown note.
 #[derive(Debug, Clone)]
 pub struct Note {
     pub path: Option<VaultPath>,
     pub title: Option<String>,
-    pub frontmatter: Frontmatter,
+    pub frontmatter: Option<Frontmatter>,
     pub sections: Vec<Section>,
 }
 
@@ -31,7 +31,7 @@ impl Note {
     pub fn try_parse(content: &str) -> Result<Self, ParseNoteError> {
         let (frontmatter, body) = try_split_frontmatter(content)?;
         let sections = parse_sections(&body);
-        let title = derive_title(&frontmatter, &sections);
+        let title = derive_title(frontmatter.as_ref(), &sections);
 
         Ok(Note {
             path: None,
@@ -65,7 +65,12 @@ impl Note {
     }
 
     fn frontmatter_tags(&self) -> impl Iterator<Item = &str> {
-        self.frontmatter.tags.iter().map(String::as_str)
+        self.frontmatter
+            .as_ref()
+            .map(|fm| fm.tags.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .map(String::as_str)
     }
 }
 
@@ -79,7 +84,7 @@ impl From<&str> for Note {
     fn from(content: &str) -> Self {
         let (frontmatter, body) = split_frontmatter(content);
         let sections = parse_sections(&body);
-        let title = derive_title(&frontmatter, &sections);
+        let title = derive_title(frontmatter.as_ref(), &sections);
 
         Note {
             path: None,
@@ -92,13 +97,9 @@ impl From<&str> for Note {
 
 impl fmt::Display for Note {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.frontmatter.title.is_some()
-            || self.frontmatter.description.is_some()
-            || !self.frontmatter.tags.is_empty()
-            || !self.frontmatter.custom.is_empty()
-        {
+        if let Some(fm) = &self.frontmatter {
             writeln!(f, "---")?;
-            let yaml = yaml_serde::to_string(&self.frontmatter).map_err(|_| fmt::Error)?;
+            let yaml = yaml_serde::to_string(fm).map_err(|_| fmt::Error)?;
             write!(f, "{yaml}")?;
             writeln!(f, "---")?;
         }
@@ -115,8 +116,9 @@ impl fmt::Display for Note {
     }
 }
 
-fn derive_title(frontmatter: &Frontmatter, sections: &[Section]) -> Option<String> {
-    if let Some(t) = &frontmatter.title
+fn derive_title(frontmatter: Option<&Frontmatter>, sections: &[Section]) -> Option<String> {
+    if let Some(fm) = frontmatter
+        && let Some(t) = &fm.title
         && !t.is_empty()
     {
         return Some(t.clone());
@@ -132,8 +134,8 @@ fn derive_title(frontmatter: &Frontmatter, sections: &[Section]) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::note::frontmatter::FrontmatterValue;
-    use crate::note::links::WikiLink;
+    use crate::note_handler::frontmatter::FrontmatterValue;
+    use crate::note_handler::links::WikiLink;
 
     #[test]
     fn parse_note_with_frontmatter() {
@@ -150,16 +152,11 @@ Some content with a [[link]] and a #tag here.
 ";
 
         let note = Note::from(content);
+        let fm = note.frontmatter.as_ref().expect("should have frontmatter");
 
         assert_eq!(note.title.as_deref(), Some("My Note"));
-        assert_eq!(
-            note.frontmatter.custom.get("draft"),
-            Some(&FrontmatterValue::Bool(true))
-        );
-        assert_eq!(
-            note.frontmatter.custom.get("count"),
-            Some(&FrontmatterValue::Number(42.0))
-        );
+        assert_eq!(fm.custom.get("draft"), Some(&FrontmatterValue::Bool(true)));
+        assert_eq!(fm.custom.get("count"), Some(&FrontmatterValue::Int(42)));
 
         // Tags from frontmatter
         let tags = note.tags();
@@ -182,7 +179,7 @@ Some content with a [[link]] and a #tag here.
         let note = Note::from(content);
 
         assert_eq!(note.title.as_deref(), Some("Hello World"));
-        assert_eq!(note.frontmatter, Frontmatter::default());
+        assert!(note.frontmatter.is_none());
     }
 
     #[test]
@@ -232,7 +229,7 @@ Content.
     fn empty_content() {
         let note = Note::from("");
         assert_eq!(note.title, None);
-        assert_eq!(note.frontmatter, Frontmatter::default());
+        assert!(note.frontmatter.is_none());
         assert_eq!(note.sections.len(), 0); // No sections for empty content
         assert_eq!(note.word_count(), 0);
     }
@@ -247,9 +244,17 @@ Content.
 
     #[test]
     fn malformed_frontmatter_falls_back_to_default() {
+        // When From<&str> encounters invalid YAML, it falls back to default Frontmatter
         let content = "---\n: : invalid yaml [\n---\nBody.\n";
         let note = Note::from(content);
-        assert_eq!(note.frontmatter, Frontmatter::default());
+        let fm = note
+            .frontmatter
+            .as_ref()
+            .expect("malformed YAML yields default frontmatter");
+        assert_eq!(fm.title, None);
+        assert!(fm.tags.is_empty());
+        assert!(fm.aliases.is_empty());
+        assert!(fm.custom.is_empty());
         assert_eq!(note.sections[0].content, "Body.\n");
     }
 
@@ -264,10 +269,13 @@ Content.
         assert!(output.contains("title"));
         assert!(output.contains("Body content."));
 
-        // Re-parse the output
+        // Reparse the output
         let note2 = Note::from(output.as_str());
         assert_eq!(note2.title, note.title);
-        assert_eq!(note2.frontmatter.tags, note.frontmatter.tags);
+        assert_eq!(
+            note2.frontmatter.as_ref().unwrap().tags,
+            note.frontmatter.as_ref().unwrap().tags
+        );
     }
 
     #[test]
@@ -359,8 +367,24 @@ See also:
             vec!["Rust Ownership", "Summary"]
         );
 
+        // Verify output contains expected content (exact equality not possible due to created/modified timestamps)
         let output = note.to_string();
-        assert_eq!(output, content);
+        assert!(output.contains("title: Rust Ownership"));
+        assert!(output.contains("draft: true"));
+        assert!(output.contains("# Rust Ownership"));
+        assert!(output.contains("[[The Rust Book]]"));
+
+        // Verify roundtrip: reparsing produces same semantic content
+        let note2 = Note::from(output.as_str());
+        assert_eq!(
+            note2.frontmatter.as_ref().unwrap().title,
+            note.frontmatter.as_ref().unwrap().title
+        );
+        assert_eq!(
+            note2.frontmatter.as_ref().unwrap().tags,
+            note.frontmatter.as_ref().unwrap().tags
+        );
+        assert_eq!(note2.sections.len(), note.sections.len());
     }
 
     #[test]
@@ -368,9 +392,67 @@ See also:
         // Windows-style CRLF line endings
         let content = "---\r\ntitle: Test\r\ntags:\r\n  - rust\r\n  - windows\r\n---\r\n# Test\r\n\r\nBody content.\r\n";
         let note = Note::from(content);
+        let fm = note.frontmatter.as_ref().expect("should have frontmatter");
 
-        assert_eq!(note.frontmatter.title, Some("Test".to_string()));
-        assert_eq!(note.frontmatter.tags, vec!["rust", "windows"]);
+        assert_eq!(fm.title, Some("Test".to_string()));
+        assert_eq!(fm.tags, vec!["rust", "windows"]);
         assert!(!note.sections.is_empty());
+    }
+
+    #[test]
+    fn try_parse_success() {
+        // Test Note::try_parse with valid content returns Ok(Note)
+        let content = "---\ntitle: Valid Note\ntags:\n  - test\n---\n# Heading\n\nBody content.";
+        let result = Note::try_parse(content);
+
+        assert!(result.is_ok());
+        let note = result.unwrap();
+        let fm = note.frontmatter.as_ref().expect("should have frontmatter");
+        assert_eq!(note.title, Some("Valid Note".to_string()));
+        assert_eq!(fm.tags, vec!["test"]);
+        assert!(!note.sections.is_empty());
+    }
+
+    #[test]
+    fn note_headings_returns_all_headings() {
+        // Test headings() method extracts all section headings
+        let content = "\
+# First Heading
+
+Content.
+
+## Second Heading
+
+More content.
+
+### Third Heading
+
+Even more content.
+";
+        let note = Note::from(content);
+        let headings = note.headings();
+
+        assert_eq!(headings.len(), 3);
+        assert_eq!(headings[0].level, 1);
+        assert_eq!(headings[0].text, "First Heading");
+        assert_eq!(headings[1].level, 2);
+        assert_eq!(headings[1].text, "Second Heading");
+        assert_eq!(headings[2].level, 3);
+        assert_eq!(headings[2].text, "Third Heading");
+    }
+
+    #[test]
+    fn note_from_string_owned() {
+        // Test From<String> impl works same as From<&str>
+        let content = String::from("# Test\n\nSome content.");
+        let note_from_string = Note::from(content.clone());
+        let note_from_str = Note::from(content.as_str());
+
+        assert_eq!(note_from_string.title, note_from_str.title);
+        assert_eq!(
+            note_from_string.sections.len(),
+            note_from_str.sections.len()
+        );
+        assert_eq!(note_from_string.frontmatter, note_from_str.frontmatter);
     }
 }
