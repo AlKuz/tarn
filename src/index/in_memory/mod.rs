@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 use crate::common::VaultPath;
-use crate::note::Note;
+use crate::note_handler::Note;
 
 use super::{Index, IndexError, IndexLink, IndexMeta, SearchParams, SectionEntry};
 
@@ -219,7 +219,11 @@ impl InMemoryIndex {
     /// Index a note, extracting all sections.
     fn index_note(inner: &mut InMemoryIndexInner, note: &Note, note_path: &VaultPath) {
         // Get frontmatter tags (attached to all sections)
-        let frontmatter_tags: Vec<String> = note.frontmatter.tags.clone();
+        let frontmatter_tags: Vec<String> = note
+            .frontmatter
+            .as_ref()
+            .map(|fm| fm.tags.clone())
+            .unwrap_or_default();
 
         for section in &note.sections {
             let section_id = SectionId::new(note_path, &section.heading_path);
@@ -516,9 +520,9 @@ impl Index for InMemoryIndex {
 // Link conversion
 // ---------------------------------------------------------------------------
 
-impl From<&crate::note::Link> for IndexLink {
-    fn from(link: &crate::note::Link) -> Self {
-        use crate::note::Link;
+impl From<&crate::note_handler::Link> for IndexLink {
+    fn from(link: &crate::note_handler::Link) -> Self {
+        use crate::note_handler::Link;
         match link {
             Link::Wiki(w) => IndexLink::Wiki {
                 target: w.target.clone(),

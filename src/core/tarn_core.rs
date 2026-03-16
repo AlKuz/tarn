@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::common::{RevisionToken, VaultPath};
 use crate::core::builder::TarnCore;
 use crate::index::{InMemoryIndex, Index, IndexError, SearchParams, SectionEntry};
-use crate::note::{Frontmatter, Link, Note};
+use crate::note_handler::{Frontmatter, Link, Note};
 use crate::observer::{LocalStorageObserver, Observer, ObserverError, StorageEvent};
 use crate::storage::{FileContent, Storage, StorageError};
 
@@ -144,7 +144,8 @@ pub struct NoteResourceResponse {
     pub path: String,
     pub title: Option<String>,
     pub revision: RevisionToken,
-    pub frontmatter: Frontmatter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<Frontmatter>,
     pub content: String,
     pub word_count: usize,
     pub tags: Vec<String>,
@@ -652,7 +653,7 @@ impl TarnCore {
         };
 
         let frontmatter = if include_frontmatter {
-            Some(note.frontmatter.clone())
+            note.frontmatter.clone()
         } else {
             None
         };
