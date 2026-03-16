@@ -155,9 +155,11 @@ mod tests {
     #[test]
     fn frontmatter_display() {
         // Test Frontmatter::fmt produces valid YAML block
-        let mut frontmatter = Frontmatter::default();
-        frontmatter.title = Some("Test Title".to_string());
-        frontmatter.tags = vec!["rust".to_string(), "test".to_string()];
+        let frontmatter = Frontmatter {
+            title: Some("Test Title".to_string()),
+            tags: vec!["rust".to_string(), "test".to_string()],
+            ..Default::default()
+        };
 
         let output = frontmatter.to_string();
         assert!(output.starts_with("---\n"));
