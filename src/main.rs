@@ -8,6 +8,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::local::{LocalSessionManager, SessionConfig},
 };
+use tokio::task::JoinHandle;
 
 use tarn::TarnBuilder;
 use tarn::mcp::TarnMcpServer;
@@ -89,6 +90,14 @@ struct Cli {
     #[arg(long, default_value = "info")]
     log_level: LogLevel,
 
+    /// Enable in-memory index for fast search
+    #[arg(long)]
+    index: bool,
+
+    /// Path for persistent index storage (implies --index)
+    #[arg(long)]
+    index_path: Option<PathBuf>,
+
     /// HTTP transport options
     #[command(flatten)]
     http: HttpOptions,
@@ -103,10 +112,38 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(cli.log_level.as_filter())
         .init();
 
-    let core = if let Some(vault) = cli.vault {
-        Arc::new(TarnBuilder::local(vault).build())
+    let use_index = cli.index || cli.index_path.is_some();
+
+    let (core, _index_sync_handle): (Arc<_>, Option<JoinHandle<()>>) = if use_index {
+        let mut builder = if let Some(vault) = cli.vault {
+            TarnBuilder::local(vault)
+        } else {
+            TarnBuilder::from_env()?
+        };
+
+        builder = if let Some(index_path) = cli.index_path {
+            builder.with_persistent_index("default", index_path)
+        } else {
+            builder.with_index("default")
+        };
+
+        let core = Arc::new(builder.build_async().await?);
+
+        tracing::info!("rebuilding index...");
+        core.rebuild_index().await?;
+        tracing::info!("index rebuilt");
+
+        let handle = core.start_index_sync()?;
+        tracing::info!("index sync started");
+
+        (core, Some(handle))
     } else {
-        Arc::new(TarnBuilder::from_env()?.build())
+        let core = if let Some(vault) = cli.vault {
+            Arc::new(TarnBuilder::local(vault).build())
+        } else {
+            Arc::new(TarnBuilder::from_env()?.build())
+        };
+        (core, None)
     };
 
     match cli.transport {

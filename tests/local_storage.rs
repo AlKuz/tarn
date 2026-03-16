@@ -55,13 +55,7 @@ mod revision_conflicts {
 
         // Create initial file
         let token1 = storage
-            .write(
-                &path,
-                FileContent::Markdown {
-                    content: "v1".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&path, FileContent::Markdown("v1".to_string()), None)
             .await
             .unwrap();
 
@@ -73,13 +67,7 @@ mod revision_conflicts {
 
         // Try to write with old token
         let result = storage
-            .write(
-                &path,
-                FileContent::Markdown {
-                    content: "v2".to_string(),
-                    token: token1,
-                },
-            )
+            .write(&path, FileContent::Markdown("v2".to_string()), Some(token1))
             .await;
 
         assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
@@ -91,13 +79,7 @@ mod revision_conflicts {
         let path = VaultPath::new("note.md").unwrap();
 
         let token1 = storage
-            .write(
-                &path,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&path, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
@@ -119,13 +101,7 @@ mod revision_conflicts {
         let to = VaultPath::new("new.md").unwrap();
 
         let token1 = storage
-            .write(
-                &from,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
@@ -134,7 +110,7 @@ mod revision_conflicts {
             .await
             .unwrap();
 
-        let result = storage.rename(&from, &to, token1).await;
+        let result = storage.r#move(&from, &to, token1).await;
 
         assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
     }
@@ -155,15 +131,13 @@ mod directory_creation {
         let result = storage
             .write(
                 &path,
-                FileContent::Markdown {
-                    content: "deep content".to_string(),
-                    token: "ignored".into(),
-                },
+                FileContent::Markdown("deep content".to_string()),
+                None,
             )
             .await;
 
         assert!(result.is_ok());
-        assert!(storage.is_exists(&path).await.unwrap());
+        assert!(storage.exists(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -173,20 +147,14 @@ mod directory_creation {
         let to = VaultPath::new("nested/target.md").unwrap();
 
         let token = storage
-            .write(
-                &from,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
-        storage.rename(&from, &to, token).await.unwrap();
+        storage.r#move(&from, &to, token).await.unwrap();
 
-        assert!(!storage.is_exists(&from).await.unwrap());
-        assert!(storage.is_exists(&to).await.unwrap());
+        assert!(!storage.exists(&from).await.unwrap());
+        assert!(storage.exists(&to).await.unwrap());
     }
 
     #[tokio::test]
@@ -196,21 +164,15 @@ mod directory_creation {
         let to = VaultPath::new("deep/nested/copy.md").unwrap();
 
         storage
-            .write(
-                &from,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
         let result = storage.copy(&from, &to).await;
 
         assert!(result.is_ok());
-        assert!(storage.is_exists(&from).await.unwrap());
-        assert!(storage.is_exists(&to).await.unwrap());
+        assert!(storage.exists(&from).await.unwrap());
+        assert!(storage.exists(&to).await.unwrap());
     }
 }
 
@@ -230,9 +192,9 @@ mod file_types {
             .await
             .unwrap();
 
-        let content = storage.read(&path).await.unwrap();
+        let file = storage.read(&path).await.unwrap();
 
-        assert!(matches!(content, FileContent::Markdown { .. }));
+        assert!(matches!(file.content, FileContent::Markdown(_)));
     }
 
     #[tokio::test]
@@ -252,10 +214,10 @@ mod file_types {
             .await
             .unwrap();
 
-        let content = storage.read(&path).await.unwrap();
+        let file = storage.read(&path).await.unwrap();
 
-        match content {
-            FileContent::Image { content: uri, .. } => {
+        match file.content {
+            FileContent::Image(uri) => {
                 let decoded = uri.decode().unwrap();
                 assert_eq!(decoded, png_bytes);
             }
@@ -272,9 +234,9 @@ mod file_types {
             .await
             .unwrap();
 
-        let content = storage.read(&path).await.unwrap();
+        let file = storage.read(&path).await.unwrap();
 
-        assert!(matches!(content, FileContent::Markdown { .. }));
+        assert!(matches!(file.content, FileContent::Markdown(_)));
     }
 }
 
@@ -317,11 +279,11 @@ mod error_handling {
     }
 
     #[tokio::test]
-    async fn is_exists_missing_returns_false_not_error() {
+    async fn exists_missing_returns_false_not_error() {
         let (_dir, storage) = create_temp_storage();
         let path = VaultPath::new("nonexistent.md").unwrap();
 
-        let exists = storage.is_exists(&path).await.unwrap();
+        let exists = storage.exists(&path).await.unwrap();
 
         assert!(!exists);
     }
@@ -358,7 +320,7 @@ mod listing {
 
         let stream = storage.list().await.unwrap();
         let stream = pin!(stream);
-        let mut files: Vec<_> = stream.collect().await;
+        let mut files: Vec<_> = stream.map(|m| m.path).collect().await;
         files.sort();
 
         assert_eq!(files.len(), 3);
@@ -376,7 +338,7 @@ mod listing {
 
         let stream = storage.list().await.unwrap();
         let stream = pin!(stream);
-        let files: Vec<_> = stream.collect().await;
+        let files: Vec<_> = stream.map(|m| m.path).collect().await;
 
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("file.md"));
@@ -470,8 +432,8 @@ mod crlf_support {
 
         let file = storage.read(&path).await.unwrap();
 
-        match file {
-            FileContent::Markdown { content, .. } => {
+        match file.content {
+            FileContent::Markdown(content) => {
                 let note = Note::from(content.as_str());
                 let fm = note.frontmatter.as_ref().expect("should have frontmatter");
                 assert_eq!(fm.title, Some("Windows Note".to_string()));
