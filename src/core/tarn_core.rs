@@ -247,9 +247,9 @@ impl TarnCore {
         tokio::pin!(stream);
 
         let mut files = Vec::new();
-        while let Some(path) = stream.next().await {
-            if path.is_note() && is_in_folder(&path, folder) {
-                files.push(path);
+        while let Some(meta) = stream.next().await {
+            if meta.path.is_note() && is_in_folder(&meta.path, folder) {
+                files.push(meta.path);
             }
         }
         Ok(files)
@@ -257,19 +257,19 @@ impl TarnCore {
 
     async fn read_and_parse(&self, path: &VaultPath) -> Result<(Note, RevisionToken), CoreError> {
         let file = self.storage.read(path).await?;
-        match file {
-            FileContent::Markdown { content, token } => {
+        match file.content {
+            FileContent::Markdown(content) => {
                 let mut note = Note::from(content.as_str());
                 note.path = Some(path.clone());
-                Ok((note, token))
+                Ok((note, file.meta.revision_token))
             }
-            FileContent::Image { .. } => Err(CoreError::NotMarkdown(path.clone())),
+            FileContent::Image(_) => Err(CoreError::NotMarkdown(path.clone())),
         }
     }
 
     /// Rebuild the index from all notes in the vault.
     ///
-    /// This clears the existing index and re-indexes all markdown files.
+    /// This clears the existing index and re-indexes all Markdown files.
     /// No-op if index is not configured.
     pub async fn rebuild_index(&self) -> Result<(), CoreError> {
         let Some(index) = &self.index else {
@@ -328,19 +328,21 @@ impl TarnCore {
                         }
 
                         match storage.read(&path).await {
-                            Ok(FileContent::Markdown { content, .. }) => {
-                                let mut note = Note::from(content.as_str());
-                                note.path = Some(path.clone());
+                            Ok(file) => match file.content {
+                                FileContent::Markdown(content) => {
+                                    let mut note = Note::from(content.as_str());
+                                    note.path = Some(path.clone());
 
-                                if let Err(e) = index.update(&note).await {
-                                    warn!(path = %path, error = %e, "failed to update index");
-                                } else {
-                                    info!(path = %path, "indexed note");
+                                    if let Err(e) = index.update(&note).await {
+                                        warn!(path = %path, error = %e, "failed to update index");
+                                    } else {
+                                        info!(path = %path, "indexed note");
+                                    }
                                 }
-                            }
-                            Ok(FileContent::Image { .. }) => {
-                                // Skip images
-                            }
+                                FileContent::Image(_) => {
+                                    // Skip images
+                                }
+                            },
                             Err(e) => {
                                 warn!(path = %path, error = %e, "failed to read note for indexing");
                             }
@@ -760,7 +762,8 @@ impl TarnCore {
         tokio::pin!(stream);
 
         let mut files = Vec::new();
-        while let Some(path) = stream.next().await {
+        while let Some(meta) = stream.next().await {
+            let path = meta.path;
             if !path.is_note() {
                 continue;
             }

@@ -55,13 +55,7 @@ mod revision_conflicts {
 
         // Create initial file
         let token1 = storage
-            .write(
-                &path,
-                FileContent::Markdown {
-                    content: "v1".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&path, FileContent::Markdown("v1".to_string()), None)
             .await
             .unwrap();
 
@@ -73,13 +67,7 @@ mod revision_conflicts {
 
         // Try to write with old token
         let result = storage
-            .write(
-                &path,
-                FileContent::Markdown {
-                    content: "v2".to_string(),
-                    token: token1,
-                },
-            )
+            .write(&path, FileContent::Markdown("v2".to_string()), Some(token1))
             .await;
 
         assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
@@ -91,13 +79,7 @@ mod revision_conflicts {
         let path = VaultPath::new("note.md").unwrap();
 
         let token1 = storage
-            .write(
-                &path,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&path, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
@@ -119,13 +101,7 @@ mod revision_conflicts {
         let to = VaultPath::new("new.md").unwrap();
 
         let token1 = storage
-            .write(
-                &from,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
@@ -134,9 +110,96 @@ mod revision_conflicts {
             .await
             .unwrap();
 
-        let result = storage.rename(&from, &to, token1).await;
+        let result = storage.r#move(&from, &to, token1).await;
 
         assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
+    }
+}
+
+// =============================================================================
+// Delete and Move Operations
+// =============================================================================
+
+mod delete_and_move {
+    use super::*;
+
+    #[tokio::test]
+    async fn delete_removes_file_successfully() {
+        let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("to_delete.md").unwrap();
+
+        let token = storage
+            .write(&path, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        assert!(storage.exists(&path).await.unwrap());
+
+        storage.delete(&path, token).await.unwrap();
+
+        assert!(!storage.exists(&path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn move_renames_file_successfully() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("original.md").unwrap();
+        let to = VaultPath::new("renamed.md").unwrap();
+
+        let token = storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.r#move(&from, &to, token).await.unwrap();
+
+        assert!(!storage.exists(&from).await.unwrap());
+        assert!(storage.exists(&to).await.unwrap());
+
+        // Verify content preserved
+        let file = storage.read(&to).await.unwrap();
+        match file.content {
+            FileContent::Markdown(content) => assert_eq!(content, "content"),
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn move_nonexistent_file_returns_not_found() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("missing.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        let result = storage.r#move(&from, &to, "fake_token".into()).await;
+
+        assert!(matches!(result, Err(StorageError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn copy_preserves_source_file() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("copy.md").unwrap();
+
+        storage
+            .write(&from, FileContent::Markdown("original".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.copy(&from, &to).await.unwrap();
+
+        // Both files should exist
+        assert!(storage.exists(&from).await.unwrap());
+        assert!(storage.exists(&to).await.unwrap());
+
+        // Content should be identical
+        let source = storage.read(&from).await.unwrap();
+        let copy = storage.read(&to).await.unwrap();
+
+        match (&source.content, &copy.content) {
+            (FileContent::Markdown(s), FileContent::Markdown(c)) => assert_eq!(s, c),
+            _ => panic!("expected markdown"),
+        }
     }
 }
 
@@ -155,15 +218,13 @@ mod directory_creation {
         let result = storage
             .write(
                 &path,
-                FileContent::Markdown {
-                    content: "deep content".to_string(),
-                    token: "ignored".into(),
-                },
+                FileContent::Markdown("deep content".to_string()),
+                None,
             )
             .await;
 
         assert!(result.is_ok());
-        assert!(storage.is_exists(&path).await.unwrap());
+        assert!(storage.exists(&path).await.unwrap());
     }
 
     #[tokio::test]
@@ -173,20 +234,14 @@ mod directory_creation {
         let to = VaultPath::new("nested/target.md").unwrap();
 
         let token = storage
-            .write(
-                &from,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
-        storage.rename(&from, &to, token).await.unwrap();
+        storage.r#move(&from, &to, token).await.unwrap();
 
-        assert!(!storage.is_exists(&from).await.unwrap());
-        assert!(storage.is_exists(&to).await.unwrap());
+        assert!(!storage.exists(&from).await.unwrap());
+        assert!(storage.exists(&to).await.unwrap());
     }
 
     #[tokio::test]
@@ -196,21 +251,15 @@ mod directory_creation {
         let to = VaultPath::new("deep/nested/copy.md").unwrap();
 
         storage
-            .write(
-                &from,
-                FileContent::Markdown {
-                    content: "content".to_string(),
-                    token: "ignored".into(),
-                },
-            )
+            .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
             .unwrap();
 
         let result = storage.copy(&from, &to).await;
 
         assert!(result.is_ok());
-        assert!(storage.is_exists(&from).await.unwrap());
-        assert!(storage.is_exists(&to).await.unwrap());
+        assert!(storage.exists(&from).await.unwrap());
+        assert!(storage.exists(&to).await.unwrap());
     }
 }
 
@@ -230,9 +279,9 @@ mod file_types {
             .await
             .unwrap();
 
-        let content = storage.read(&path).await.unwrap();
+        let file = storage.read(&path).await.unwrap();
 
-        assert!(matches!(content, FileContent::Markdown { .. }));
+        assert!(matches!(file.content, FileContent::Markdown(_)));
     }
 
     #[tokio::test]
@@ -252,10 +301,10 @@ mod file_types {
             .await
             .unwrap();
 
-        let content = storage.read(&path).await.unwrap();
+        let file = storage.read(&path).await.unwrap();
 
-        match content {
-            FileContent::Image { content: uri, .. } => {
+        match file.content {
+            FileContent::Image(uri) => {
                 let decoded = uri.decode().unwrap();
                 assert_eq!(decoded, png_bytes);
             }
@@ -272,9 +321,9 @@ mod file_types {
             .await
             .unwrap();
 
-        let content = storage.read(&path).await.unwrap();
+        let file = storage.read(&path).await.unwrap();
 
-        assert!(matches!(content, FileContent::Markdown { .. }));
+        assert!(matches!(file.content, FileContent::Markdown(_)));
     }
 }
 
@@ -317,11 +366,11 @@ mod error_handling {
     }
 
     #[tokio::test]
-    async fn is_exists_missing_returns_false_not_error() {
+    async fn exists_missing_returns_false_not_error() {
         let (_dir, storage) = create_temp_storage();
         let path = VaultPath::new("nonexistent.md").unwrap();
 
-        let exists = storage.is_exists(&path).await.unwrap();
+        let exists = storage.exists(&path).await.unwrap();
 
         assert!(!exists);
     }
@@ -358,7 +407,7 @@ mod listing {
 
         let stream = storage.list().await.unwrap();
         let stream = pin!(stream);
-        let mut files: Vec<_> = stream.collect().await;
+        let mut files: Vec<_> = stream.map(|m| m.path).collect().await;
         files.sort();
 
         assert_eq!(files.len(), 3);
@@ -376,7 +425,7 @@ mod listing {
 
         let stream = storage.list().await.unwrap();
         let stream = pin!(stream);
-        let files: Vec<_> = stream.collect().await;
+        let files: Vec<_> = stream.map(|m| m.path).collect().await;
 
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("file.md"));
@@ -447,6 +496,485 @@ mod data_uri {
 }
 
 // =============================================================================
+// Access Control (deny_access / read_only_access)
+// =============================================================================
+
+mod access_control {
+    use super::*;
+
+    #[tokio::test]
+    async fn deny_access_blocks_read() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("secret.md").unwrap();
+
+        fs::write(dir.path().join(path.as_str()), "secret content")
+            .await
+            .unwrap();
+
+        storage.deny_access(std::slice::from_ref(&path));
+
+        let result = storage.read(&path).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_blocks_write() {
+        let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("protected.md").unwrap();
+
+        storage.deny_access(std::slice::from_ref(&path));
+
+        let result = storage
+            .write(&path, FileContent::Markdown("test".to_string()), None)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_blocks_delete() {
+        let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("note.md").unwrap();
+
+        let token = storage
+            .write(&path, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.deny_access(std::slice::from_ref(&path));
+
+        let result = storage.delete(&path, token).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_blocks_move_from() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        let token = storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.deny_access(std::slice::from_ref(&from));
+
+        let result = storage.r#move(&from, &to, token).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_blocks_move_to() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        let token = storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.deny_access(std::slice::from_ref(&to));
+
+        let result = storage.r#move(&from, &to, token).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_blocks_copy_from() {
+        let (dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        fs::write(dir.path().join(from.as_str()), "content")
+            .await
+            .unwrap();
+
+        storage.deny_access(std::slice::from_ref(&from));
+
+        let result = storage.copy(&from, &to).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_blocks_copy_to() {
+        let (dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        fs::write(dir.path().join(from.as_str()), "content")
+            .await
+            .unwrap();
+
+        storage.deny_access(std::slice::from_ref(&to));
+
+        let result = storage.copy(&from, &to).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn read_only_allows_read_but_blocks_write() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("readonly.md").unwrap();
+
+        fs::write(dir.path().join(path.as_str()), "original")
+            .await
+            .unwrap();
+
+        storage.read_only_access(std::slice::from_ref(&path));
+
+        // Read should succeed
+        let file = storage.read(&path).await.unwrap();
+        assert!(matches!(file.content, FileContent::Markdown(_)));
+
+        // Write should fail
+        let result = storage
+            .write(&path, FileContent::Markdown("modified".to_string()), None)
+            .await;
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn read_only_blocks_delete() {
+        let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("note.md").unwrap();
+
+        let token = storage
+            .write(&path, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.read_only_access(std::slice::from_ref(&path));
+
+        let result = storage.delete(&path, token).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn read_only_blocks_move_from() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        let token = storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.read_only_access(std::slice::from_ref(&from));
+
+        let result = storage.r#move(&from, &to, token).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn read_only_blocks_move_to() {
+        let (_dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        let token = storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        storage.read_only_access(std::slice::from_ref(&to));
+
+        let result = storage.r#move(&from, &to, token).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn read_only_blocks_copy_to() {
+        let (dir, storage) = create_temp_storage();
+        let from = VaultPath::new("source.md").unwrap();
+        let to = VaultPath::new("target.md").unwrap();
+
+        fs::write(dir.path().join(from.as_str()), "content")
+            .await
+            .unwrap();
+
+        storage.read_only_access(std::slice::from_ref(&to));
+
+        let result = storage.copy(&from, &to).await;
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn deny_access_can_be_updated() {
+        let (dir, storage) = create_temp_storage();
+        let path1 = VaultPath::new("note1.md").unwrap();
+        let path2 = VaultPath::new("note2.md").unwrap();
+
+        fs::write(dir.path().join(path1.as_str()), "content1")
+            .await
+            .unwrap();
+        fs::write(dir.path().join(path2.as_str()), "content2")
+            .await
+            .unwrap();
+
+        // Deny path1
+        storage.deny_access(std::slice::from_ref(&path1));
+        assert!(storage.read(&path1).await.is_err());
+        assert!(storage.read(&path2).await.is_ok());
+
+        // Update to deny path2 instead
+        storage.deny_access(std::slice::from_ref(&path2));
+        assert!(storage.read(&path1).await.is_ok());
+        assert!(storage.read(&path2).await.is_err());
+
+        // Clear all denials
+        storage.deny_access(&[]);
+        assert!(storage.read(&path1).await.is_ok());
+        assert!(storage.read(&path2).await.is_ok());
+    }
+}
+
+// =============================================================================
+// Image Writing
+// =============================================================================
+
+mod image_write {
+    use super::*;
+    use tarn::common::DataURI;
+
+    #[tokio::test]
+    async fn write_image_as_data_uri() {
+        let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("image.png").unwrap();
+
+        // Minimal PNG bytes
+        let png_bytes: [u8; 67] = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        let data_uri = DataURI::new("image/png".to_string(), &png_bytes);
+        let result = storage
+            .write(&path, FileContent::Image(data_uri), None)
+            .await;
+
+        assert!(result.is_ok());
+
+        // Verify written content matches
+        let file = storage.read(&path).await.unwrap();
+        match file.content {
+            FileContent::Image(uri) => {
+                let decoded = uri.decode().unwrap();
+                assert_eq!(decoded, png_bytes);
+            }
+            _ => panic!("expected Image content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_image_creates_parent_directories() {
+        let (_dir, storage) = create_temp_storage();
+        let path = VaultPath::new("assets/images/deep/photo.jpg").unwrap();
+
+        let jpeg_marker = b"\xFF\xD8\xFF"; // JPEG magic bytes
+        let data_uri = DataURI::new("image/jpeg".to_string(), jpeg_marker);
+
+        let result = storage
+            .write(&path, FileContent::Image(data_uri), None)
+            .await;
+
+        assert!(result.is_ok());
+        assert!(storage.exists(&path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn write_image_with_revision_conflict() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("image.png").unwrap();
+
+        let png_bytes = [0x89, 0x50, 0x4E, 0x47];
+        let data_uri = DataURI::new("image/png".to_string(), &png_bytes);
+
+        let token1 = storage
+            .write(&path, FileContent::Image(data_uri.clone()), None)
+            .await
+            .unwrap();
+
+        // External modification
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        fs::write(dir.path().join(path.as_str()), b"modified")
+            .await
+            .unwrap();
+
+        // Attempt to write with stale token
+        let result = storage
+            .write(&path, FileContent::Image(data_uri), Some(token1))
+            .await;
+
+        assert!(matches!(result, Err(StorageError::Conflict(_, _, _))));
+    }
+}
+
+// =============================================================================
+// MIME Type Detection (additional formats)
+// =============================================================================
+
+mod mime_types {
+    use super::*;
+
+    #[tokio::test]
+    async fn jpeg_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("photo.jpg").unwrap();
+
+        // JPEG magic bytes (SOI marker)
+        let jpeg_bytes = [0xFF, 0xD8, 0xFF, 0xE0];
+        fs::write(dir.path().join(path.as_str()), &jpeg_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn jpeg_extension_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("photo.jpeg").unwrap();
+
+        let jpeg_bytes = [0xFF, 0xD8, 0xFF, 0xE0];
+        fs::write(dir.path().join(path.as_str()), &jpeg_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn gif_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("animation.gif").unwrap();
+
+        // GIF magic bytes
+        let gif_bytes = b"GIF89a";
+        fs::write(dir.path().join(path.as_str()), gif_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn webp_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("modern.webp").unwrap();
+
+        // WebP magic bytes (RIFF....WEBP)
+        let webp_bytes = b"RIFF\x00\x00\x00\x00WEBP";
+        fs::write(dir.path().join(path.as_str()), webp_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn svg_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("icon.svg").unwrap();
+
+        let svg_content = r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
+        fs::write(dir.path().join(path.as_str()), svg_content)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn bmp_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("bitmap.bmp").unwrap();
+
+        // BMP magic bytes
+        let bmp_bytes = b"BM";
+        fs::write(dir.path().join(path.as_str()), bmp_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn ico_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("favicon.ico").unwrap();
+
+        // ICO magic bytes
+        let ico_bytes = [0x00, 0x00, 0x01, 0x00];
+        fs::write(dir.path().join(path.as_str()), &ico_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn tiff_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("document.tiff").unwrap();
+
+        // TIFF magic bytes (little-endian)
+        let tiff_bytes = b"II\x2A\x00";
+        fs::write(dir.path().join(path.as_str()), tiff_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn tif_extension_read_as_image() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("scan.tif").unwrap();
+
+        let tiff_bytes = b"MM\x00\x2A"; // big-endian TIFF
+        fs::write(dir.path().join(path.as_str()), tiff_bytes)
+            .await
+            .unwrap();
+
+        let file = storage.read(&path).await.unwrap();
+
+        assert!(matches!(file.content, FileContent::Image(_)));
+    }
+}
+
+// =============================================================================
 // Cross-Platform Line Endings (CRLF support for Windows)
 // =============================================================================
 
@@ -470,8 +998,8 @@ mod crlf_support {
 
         let file = storage.read(&path).await.unwrap();
 
-        match file {
-            FileContent::Markdown { content, .. } => {
+        match file.content {
+            FileContent::Markdown(content) => {
                 let note = Note::from(content.as_str());
                 let fm = note.frontmatter.as_ref().expect("should have frontmatter");
                 assert_eq!(fm.title, Some("Windows Note".to_string()));
@@ -516,7 +1044,7 @@ mod crlf_support {
 
         fs::write(
             dir.path().join("searchable.md"),
-            "---\r\ntitle: Searchable\r\n---\r\n# Searchable\r\n\r\nThis note contains uniqueterm123 for testing.\r\n",
+            "---\r\ntitle: Searchable\r\n---\r\n# Searchable\r\n\r\nThis note contains unique_term_123 for testing.\r\n",
         )
         .await
         .unwrap();
@@ -524,11 +1052,137 @@ mod crlf_support {
         let core = TarnBuilder::local(dir.path().to_path_buf()).build();
 
         let results = core
-            .search_notes("uniqueterm123", None, None, 10, 0)
+            .search_notes("unique_term_123", None, None, 10, 0)
             .await
             .unwrap();
 
         assert_eq!(results.total, 1);
         assert_eq!(results.results[0].title, Some("Searchable".to_string()));
+    }
+}
+
+// =============================================================================
+// Unix Permission Errors (platform-specific)
+// =============================================================================
+
+#[cfg(unix)]
+mod unix_permissions {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    use tarn::common::VaultPath;
+    use tarn::storage::{FileContent, LocalStorage, Storage, StorageError};
+
+    use super::create_temp_storage;
+
+    #[tokio::test]
+    async fn read_permission_denied_returns_error() {
+        let (dir, storage) = create_temp_storage();
+        let path = VaultPath::new("secret.md").unwrap();
+
+        let file_path = dir.path().join(path.as_str());
+        fs::write(&file_path, "secret content").await.unwrap();
+
+        // Remove all permissions
+        let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&file_path, perms).unwrap();
+
+        let result = storage.read(&path).await;
+
+        // Restore permissions for cleanup
+        let mut perms = std::fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&file_path, perms).unwrap();
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn write_to_readonly_parent_fails() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path().to_path_buf());
+
+        // Create a readonly directory
+        let readonly_dir = dir.path().join("readonly");
+        std::fs::create_dir(&readonly_dir).unwrap();
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o555); // r-xr-xr-x
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+
+        let path = VaultPath::new("readonly/nested/note.md").unwrap();
+
+        let result = storage
+            .write(&path, FileContent::Markdown("content".to_string()), None)
+            .await;
+
+        // Restore permissions for cleanup
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn move_to_readonly_parent_fails() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path().to_path_buf());
+
+        // Create source file
+        let from = VaultPath::new("source.md").unwrap();
+        let token = storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        // Create a readonly directory
+        let readonly_dir = dir.path().join("readonly");
+        std::fs::create_dir(&readonly_dir).unwrap();
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+
+        let to = VaultPath::new("readonly/nested/target.md").unwrap();
+        let result = storage.r#move(&from, &to, token).await;
+
+        // Restore permissions for cleanup
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn copy_to_readonly_parent_fails() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path().to_path_buf());
+
+        // Create source file
+        let from = VaultPath::new("source.md").unwrap();
+        storage
+            .write(&from, FileContent::Markdown("content".to_string()), None)
+            .await
+            .unwrap();
+
+        // Create a readonly directory
+        let readonly_dir = dir.path().join("readonly");
+        std::fs::create_dir(&readonly_dir).unwrap();
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+
+        let to = VaultPath::new("readonly/nested/copy.md").unwrap();
+        let result = storage.copy(&from, &to).await;
+
+        // Restore permissions for cleanup
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
+
+        assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
     }
 }
