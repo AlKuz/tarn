@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/AlKuz/tarn/compare/v0.2.1...v0.2.2) (2026-03-17)
+
+
+### Bug Fixes
+
+* storage interface ([#18](https://github.com/AlKuz/tarn/issues/18)) ([c5d63dd](https://github.com/AlKuz/tarn/commit/c5d63dd01b7088db24410716ea6a28eabb675508))
+
 ## [0.2.1](https://github.com/AlKuz/tarn/compare/v0.2.0...v0.2.1) (2026-03-16)
 
 
