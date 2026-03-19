@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/AlKuz/tarn/compare/v0.2.2...v0.2.3) (2026-03-19)
+
+
+### Bug Fixes
+
+* note handler ([#20](https://github.com/AlKuz/tarn/issues/20)) ([12df066](https://github.com/AlKuz/tarn/commit/12df06675714aaf81a37ae17d6c7e9de58064b8c))
+
 ## [0.2.2](https://github.com/AlKuz/tarn/compare/v0.2.1...v0.2.2) (2026-03-17)
 
 
