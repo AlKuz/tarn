@@ -1,21 +1,15 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use thiserror::Error;
-
 use crate::common::VaultPath;
 
+use super::ExtractFrom;
+use super::error::NoteHandlerError;
 use super::frontmatter::Frontmatter;
 use super::links::Link;
-use super::sections::{Heading, Section, parse_sections};
+use super::sections::{Heading, Section};
 
 use super::frontmatter::{split_frontmatter, try_split_frontmatter};
-
-#[derive(Debug, Error)]
-pub enum ParseNoteError {
-    #[error("invalid frontmatter YAML: {0}")]
-    InvalidFrontmatter(#[from] yaml_serde::Error),
-}
 
 /// Result of parsing an Obsidian Markdown note.
 #[derive(Debug, Clone)]
@@ -28,9 +22,10 @@ pub struct Note {
 
 impl Note {
     /// Parse a note, propagating frontmatter errors.
-    pub fn try_parse(content: &str) -> Result<Self, ParseNoteError> {
-        let (frontmatter, body) = try_split_frontmatter(content)?;
-        let sections = parse_sections(&body);
+    pub fn try_parse(content: &str) -> Result<Self, NoteHandlerError> {
+        let (frontmatter, body) = try_split_frontmatter(content)
+            .map_err(|e| NoteHandlerError::InvalidFrontmatter(e.to_string()))?;
+        let sections = Section::extract_from(&body);
         let title = derive_title(frontmatter.as_ref(), &sections);
 
         Ok(Note {
@@ -55,13 +50,13 @@ impl Note {
     pub fn tags(&self) -> HashSet<&str> {
         self.sections
             .iter()
-            .flat_map(|s| s.tags.iter().map(String::as_str))
+            .flat_map(|s| s.tags.iter().map(|t| t.name()))
             .chain(self.frontmatter_tags())
             .collect()
     }
 
     pub fn word_count(&self) -> usize {
-        self.sections.iter().map(|s| s.word_count).sum()
+        self.sections.iter().map(|s| s.word_count()).sum()
     }
 
     fn frontmatter_tags(&self) -> impl Iterator<Item = &str> {
@@ -83,7 +78,7 @@ impl From<String> for Note {
 impl From<&str> for Note {
     fn from(content: &str) -> Self {
         let (frontmatter, body) = split_frontmatter(content);
-        let sections = parse_sections(&body);
+        let sections = Section::extract_from(&body);
         let title = derive_title(frontmatter.as_ref(), &sections);
 
         Note {
@@ -104,12 +99,6 @@ impl fmt::Display for Note {
             writeln!(f, "---")?;
         }
         for section in &self.sections {
-            if let Some(h) = &section.heading {
-                for _ in 0..h.level {
-                    write!(f, "#")?;
-                }
-                writeln!(f, " {}", h.text)?;
-            }
             write!(f, "{}", section.content)?;
         }
         Ok(())
@@ -136,6 +125,7 @@ mod tests {
     use super::*;
     use crate::note_handler::frontmatter::FrontmatterValue;
     use crate::note_handler::links::WikiLink;
+    use crate::note_handler::tags::Tag;
 
     #[test]
     fn parse_note_with_frontmatter() {
@@ -347,7 +337,11 @@ See also:
             note.sections[1].heading_path,
             vec!["Rust Ownership", "Borrowing"]
         );
-        assert!(note.sections[1].tags.contains("borrowing"));
+        assert!(
+            note.sections[1]
+                .tags
+                .contains(&Tag::new("#borrowing").unwrap())
+        );
 
         // Section 2: ## Lifetimes
         assert_eq!(note.sections[2].heading.as_ref().unwrap().level, 2);
@@ -356,8 +350,16 @@ See also:
             note.sections[2].heading_path,
             vec!["Rust Ownership", "Lifetimes"]
         );
-        assert!(note.sections[2].tags.contains("rust/advanced"));
-        assert!(note.sections[2].tags.contains("lifetime"));
+        assert!(
+            note.sections[2]
+                .tags
+                .contains(&Tag::new("#rust/advanced").unwrap())
+        );
+        assert!(
+            note.sections[2]
+                .tags
+                .contains(&Tag::new("#lifetime").unwrap())
+        );
 
         // Section 3: ## Summary
         assert_eq!(note.sections[3].heading.as_ref().unwrap().level, 2);
@@ -439,6 +441,31 @@ Even more content.
         assert_eq!(headings[1].text, "Second Heading");
         assert_eq!(headings[2].level, 3);
         assert_eq!(headings[2].text, "Third Heading");
+    }
+
+    #[test]
+    fn try_parse_error_variant_is_invalid_frontmatter() {
+        let content = "---\n: : invalid yaml [\n---\nBody.\n";
+        let err = Note::try_parse(content).unwrap_err();
+        assert!(matches!(err, NoteHandlerError::InvalidFrontmatter(_)));
+    }
+
+    #[test]
+    fn try_parse_no_frontmatter_succeeds() {
+        let content = "Just plain text, no frontmatter delimiters.";
+        let note = Note::try_parse(content).unwrap();
+        assert!(note.frontmatter.is_none());
+        assert!(!note.sections.is_empty());
+    }
+
+    #[test]
+    fn note_with_frontmatter_empty_body() {
+        let content = "---\ntitle: Empty Body\n---\n";
+        let note = Note::from(content);
+        assert_eq!(note.title.as_deref(), Some("Empty Body"));
+        assert!(note.frontmatter.is_some());
+        assert_eq!(note.sections.len(), 0);
+        assert_eq!(note.word_count(), 0);
     }
 
     #[test]

@@ -3,44 +3,19 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::ExtractFrom;
 use super::links::Link;
-use super::tags::extract_inline_tags;
+use super::tags::Tag;
+use super::tasks::Task;
 
+/// Matches a heading line: captures (level hashes, heading text).
 static HEADING_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^(#{1,6})\s+(.+?)(?:\s+#+)?$").expect("valid heading regex"));
-
-static TASK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^[\t ]*- \[(.)]\s*(.*)$").expect("valid task regex"));
-
-/// A task item extracted from a note (checkbox list item).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Task {
-    /// 1-based line number where the task appears.
-    pub line: usize,
-    /// Task completion status.
-    pub status: TaskStatus,
-    /// Task description text (without the checkbox marker).
-    pub text: String,
-}
-
-/// Completion status of a task checkbox.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TaskStatus {
-    /// Incomplete task: `- [ ]`
-    Open,
-    /// Completed task: `- [x]`
-    Done,
-    /// Cancelled task: `- [-]`
-    Canceled,
-    /// Custom status marker, e.g. `- [>]` for deferred.
-    Custom(char),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heading {
     pub level: u8,
     pub text: String,
-    pub offset: usize,
 }
 
 /// A section of a note delimited by headings.
@@ -53,138 +28,75 @@ pub struct Section {
     /// under `## Goals` under `# Project Alpha`.
     pub heading_path: Vec<String>,
     pub content: String,
-    pub links: Vec<Link>,
-    pub tags: HashSet<String>,
-    pub word_count: usize,
+    pub links: HashSet<Link>,
+    pub tags: HashSet<Tag>,
     pub tasks: Vec<Task>,
 }
 
-pub(crate) fn parse_sections(body: &str) -> Vec<Section> {
-    let mut sections: Vec<Section> = Vec::new();
-    let mut current_heading: Option<Heading> = None;
-    let mut current_content = String::new();
-    let mut offset = 0;
-    let mut line_number = 1usize;
-    let mut section_start_line = 1usize;
-    // Stack of (level, text) for building heading paths
-    let mut heading_stack: Vec<(u8, String)> = Vec::new();
-    let mut current_heading_path: Vec<String> = Vec::new();
+impl Section {
+    /// Count of words in the section content.
+    pub fn word_count(&self) -> usize {
+        self.content.split_whitespace().count()
+    }
+}
 
-    for line in body.lines() {
-        if let Some(caps) = HEADING_RE.captures(line) {
-            let level = caps[1].len() as u8;
-            let text = caps[2].to_string();
-            let heading = Heading {
-                level,
-                text: text.clone(),
-                offset,
-            };
+impl ExtractFrom for Heading {
+    type Output = Option<Heading>;
 
-            // Flush previous section (only if there's content or a heading)
-            if current_heading.is_some() || !current_content.trim().is_empty() {
-                let section = build_section(
-                    current_heading.take(),
-                    current_heading_path.clone(),
-                    &current_content,
-                    section_start_line,
-                );
-                sections.push(section);
-            }
+    /// Extract a heading from the first line of text if it matches.
+    fn extract_from(text: &str) -> Self::Output {
+        let first_line = text.lines().next()?;
+        let caps = HEADING_RE.captures(first_line)?;
+        Some(Heading {
+            level: caps[1].len() as u8,
+            text: caps[2].to_string(),
+        })
+    }
+}
 
-            // Update heading stack: pop entries at same or deeper level
-            while heading_stack
-                .last()
-                .is_some_and(|(stack_level, _)| *stack_level >= level)
-            {
-                heading_stack.pop();
-            }
-            heading_stack.push((level, text.clone()));
+impl ExtractFrom for Section {
+    type Output = Vec<Section>;
 
-            // Build current heading path from stack
-            current_heading_path = heading_stack.iter().map(|(_, t)| t.clone()).collect();
+    fn extract_from(text: &str) -> Self::Output {
+        let mut sections = Vec::new();
+        let mut last = 0;
 
-            current_heading = Some(heading);
-            current_content.clear();
-            section_start_line = line_number + 1;
-            offset += line.len() + line_ending_len(body, offset + line.len());
-            line_number += 1;
-            continue;
+        for m in HEADING_RE.find_iter(text) {
+            sections.push(&text[last..m.start()]);
+            last = m.start();
         }
+        sections.push(&text[last..]);
 
-        current_content.push_str(line);
-        current_content.push('\n');
-        offset += line.len() + line_ending_len(body, offset + line.len());
-        line_number += 1;
+        let mut heading_stack: Vec<(u8, String)> = Vec::new();
+        sections
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|&text_section| {
+                let heading = Heading::extract_from(text_section);
+                let heading_path = if let Some(ref h) = heading {
+                    while heading_stack
+                        .last()
+                        .is_some_and(|(level, _)| *level >= h.level)
+                    {
+                        heading_stack.pop();
+                    }
+                    heading_stack.push((h.level, h.text.clone()));
+                    heading_stack.iter().map(|(_, t)| t.clone()).collect()
+                } else {
+                    Vec::new()
+                };
+
+                Section {
+                    heading,
+                    heading_path,
+                    content: text_section.to_string(),
+                    links: Link::extract_from(text_section),
+                    tags: Tag::extract_from(text_section),
+                    tasks: Task::extract_from(text_section),
+                }
+            })
+            .collect()
     }
-
-    // Flush last section (only if there's content or a heading)
-    if current_heading.is_some() || !current_content.trim().is_empty() {
-        let section = build_section(
-            current_heading,
-            current_heading_path,
-            &current_content,
-            section_start_line,
-        );
-        sections.push(section);
-    }
-
-    sections
-}
-
-/// Determine the line ending length at the given byte position.
-/// Handles `\r\n`, `\n`, and end-of-string.
-fn line_ending_len(s: &str, pos: usize) -> usize {
-    let bytes = s.as_bytes();
-    if bytes.get(pos) == Some(&b'\r') && bytes.get(pos + 1) == Some(&b'\n') {
-        2
-    } else if bytes.get(pos) == Some(&b'\n') {
-        1
-    } else {
-        0
-    }
-}
-
-fn build_section(
-    heading: Option<Heading>,
-    heading_path: Vec<String>,
-    content: &str,
-    start_line: usize,
-) -> Section {
-    let links = Link::extract(content);
-    let tags = extract_inline_tags(content);
-    let word_count = content.split_whitespace().count();
-    let tasks = extract_tasks(content, start_line);
-
-    Section {
-        heading,
-        heading_path,
-        content: content.to_string(),
-        links,
-        tags,
-        word_count,
-        tasks,
-    }
-}
-
-fn extract_tasks(content: &str, start_line: usize) -> Vec<Task> {
-    let mut tasks = Vec::new();
-    for (line_offset, line) in content.lines().enumerate() {
-        if let Some(caps) = TASK_RE.captures(line) {
-            let marker = caps[1].chars().next().unwrap();
-            let status = match marker {
-                ' ' => TaskStatus::Open,
-                'x' | 'X' => TaskStatus::Done,
-                '-' => TaskStatus::Canceled,
-                c => TaskStatus::Custom(c),
-            };
-            tasks.push(Task {
-                line: start_line + line_offset,
-                status,
-                text: caps[2].to_string(),
-            });
-        }
-    }
-    tasks
 }
 
 #[cfg(test)]
@@ -192,7 +104,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_sections_by_headings() {
+    fn extract_from_by_headings() {
         let body = "\
 Intro paragraph.
 
@@ -208,7 +120,7 @@ Nested content.
 
 Content two.
 ";
-        let sections = parse_sections(body);
+        let sections = Section::extract_from(body);
 
         assert_eq!(sections.len(), 4);
 
@@ -233,27 +145,63 @@ Content two.
     }
 
     #[test]
-    fn heading_offsets_are_tracked() {
-        let body = "Intro\n\n## First\n\nContent\n\n## Second\n";
-        let sections = parse_sections(body);
-        let headings: Vec<_> = sections.iter().filter_map(|s| s.heading.as_ref()).collect();
-
-        assert_eq!(headings.len(), 2);
-        assert_eq!(headings[0].text, "First");
-        assert!(headings[0].offset > 0);
-        assert!(headings[1].offset > headings[0].offset);
-    }
-
-    #[test]
     fn crlf_line_endings() {
         let body = "Intro\r\n\r\n## First\r\n\r\nContent\r\n\r\n## Second\r\n";
-        let sections = parse_sections(body);
+        let sections = Section::extract_from(body);
         let headings: Vec<_> = sections.iter().filter_map(|s| s.heading.as_ref()).collect();
 
         assert_eq!(headings.len(), 2);
         assert_eq!(headings[0].text, "First");
         assert_eq!(headings[1].text, "Second");
-        assert!(headings[1].offset > headings[0].offset);
+    }
+
+    #[test]
+    fn empty_content_produces_no_sections() {
+        let sections = Section::extract_from("");
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn content_without_headings_single_section() {
+        let sections = Section::extract_from("Just plain text.\n\nAnother paragraph.\n");
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].heading.is_none());
+        assert!(sections[0].heading_path.is_empty());
+        assert!(sections[0].content.contains("Just plain text"));
+    }
+
+    #[test]
+    fn section_word_count() {
+        let sections = Section::extract_from("# Title\n\nOne two three four five.\n");
+        assert_eq!(sections.len(), 1);
+        // "# Title", "", "One two three four five." — heading line + body
+        assert!(sections[0].word_count() > 0);
+        // "# Title One two three four five." = 7 words (split_whitespace)
+        assert_eq!(sections[0].word_count(), 7);
+    }
+
+    #[test]
+    fn heading_extract_from_non_heading() {
+        assert!(Heading::extract_from("Just a paragraph.").is_none());
+        assert!(Heading::extract_from("").is_none());
+        assert!(Heading::extract_from("##nospace").is_none());
+    }
+
+    #[test]
+    fn heading_with_atx_closing_hashes() {
+        let heading = Heading::extract_from("## Title ##").unwrap();
+        assert_eq!(heading.level, 2);
+        assert_eq!(heading.text, "Title");
+    }
+
+    #[test]
+    fn sections_contain_links_tags_tasks() {
+        let body = "## Section\n\nSee [[target]] and #mytag here.\n\n- [ ] A task\n";
+        let sections = Section::extract_from(body);
+        assert_eq!(sections.len(), 1);
+        assert!(!sections[0].links.is_empty());
+        assert!(!sections[0].tags.is_empty());
+        assert!(!sections[0].tasks.is_empty());
     }
 
     #[test]
@@ -285,7 +233,7 @@ Current status.
 
 Another project.
 ";
-        let sections = parse_sections(body);
+        let sections = Section::extract_from(body);
 
         // Intro section: no heading, empty path
         assert!(sections[0].heading.is_none());
@@ -314,47 +262,5 @@ Another project.
 
         // # Project Beta (new top-level)
         assert_eq!(sections[6].heading_path, vec!["Project Beta"]);
-    }
-
-    #[test]
-    fn task_status_cancelled() {
-        // Test - [-] extracts as TaskStatus::Canceled
-        let body = "Some text.\n\n- [-] Cancelled task\n- [ ] Open task\n";
-        let sections = parse_sections(body);
-
-        assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].tasks.len(), 2);
-
-        assert_eq!(sections[0].tasks[0].status, TaskStatus::Canceled);
-        assert_eq!(sections[0].tasks[0].text, "Cancelled task");
-
-        assert_eq!(sections[0].tasks[1].status, TaskStatus::Open);
-    }
-
-    #[test]
-    fn task_status_custom() {
-        // Test - [>], - [?], etc. extract as TaskStatus::Custom
-        let body = "\
-- [>] Deferred task
-- [?] Question task
-- [!] Important task
-- [x] Completed task
-";
-        let sections = parse_sections(body);
-
-        assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].tasks.len(), 4);
-
-        assert_eq!(sections[0].tasks[0].status, TaskStatus::Custom('>'));
-        assert_eq!(sections[0].tasks[0].text, "Deferred task");
-
-        assert_eq!(sections[0].tasks[1].status, TaskStatus::Custom('?'));
-        assert_eq!(sections[0].tasks[1].text, "Question task");
-
-        assert_eq!(sections[0].tasks[2].status, TaskStatus::Custom('!'));
-        assert_eq!(sections[0].tasks[2].text, "Important task");
-
-        assert_eq!(sections[0].tasks[3].status, TaskStatus::Done);
-        assert_eq!(sections[0].tasks[3].text, "Completed task");
     }
 }

@@ -620,7 +620,7 @@ impl TarnCore {
                 s.heading.as_ref().map(|h| SectionSummary {
                     heading: h.text.clone(),
                     level: h.level,
-                    word_count: s.word_count,
+                    word_count: s.word_count(),
                 })
             })
             .collect();

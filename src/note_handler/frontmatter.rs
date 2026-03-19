@@ -198,4 +198,50 @@ mod tests {
         let result = try_split_frontmatter(content);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn split_frontmatter_empty_yaml_block() {
+        let content = "---\n\n---\nBody text.";
+        let (fm, body) = split_frontmatter(content);
+        let fm = fm.expect("empty YAML block should produce Some(default)");
+        assert_eq!(fm, Frontmatter::default());
+        assert_eq!(body, "Body text.");
+    }
+
+    #[test]
+    fn split_frontmatter_invalid_yaml_falls_back() {
+        let content = "---\n: : invalid yaml [\n---\nBody.";
+        let (fm, body) = split_frontmatter(content);
+        let fm = fm.expect("invalid YAML should fall back to default");
+        assert_eq!(fm, Frontmatter::default());
+        assert_eq!(body, "Body.");
+    }
+
+    #[test]
+    fn frontmatter_with_description_and_aliases() {
+        let content = "---\ntitle: Test\ndescription: A description\naliases:\n  - alias1\n  - alias2\n---\n";
+        let (fm, _) = split_frontmatter(content);
+        let fm = fm.unwrap();
+        assert_eq!(fm.description, Some("A description".to_string()));
+        assert_eq!(fm.aliases, vec!["alias1", "alias2"]);
+    }
+
+    #[test]
+    fn frontmatter_from_str_roundtrip() {
+        let fm = Frontmatter {
+            title: Some("Round Trip".to_string()),
+            tags: vec!["a".to_string(), "b".to_string()],
+            ..Default::default()
+        };
+        let displayed = fm.to_string();
+        // Extract the YAML between --- delimiters
+        let yaml = displayed
+            .strip_prefix("---\n")
+            .unwrap()
+            .strip_suffix("\n---")
+            .unwrap();
+        let reparsed: Frontmatter = yaml.parse().unwrap();
+        assert_eq!(reparsed.title, fm.title);
+        assert_eq!(reparsed.tags, fm.tags);
+    }
 }
