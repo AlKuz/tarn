@@ -1,9 +1,12 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
 use regex::Regex;
-use thiserror::Error;
+
+use super::ExtractFrom;
+use super::error::NoteHandlerError;
 
 // ---------------------------------------------------------------------------
 // Static regexes
@@ -44,10 +47,6 @@ static AUTOLINK_EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("not a recognized link syntax")]
-pub struct ParseLinkError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WikiLink {
@@ -208,7 +207,7 @@ impl fmt::Display for Link {
 // ---------------------------------------------------------------------------
 
 impl FromStr for Link {
-    type Err = ParseLinkError;
+    type Err = NoteHandlerError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(caps) = WIKILINK_RE.captures(s) {
@@ -223,7 +222,7 @@ impl FromStr for Link {
         if let Some(caps) = AUTOLINK_EMAIL_RE.captures(s) {
             return Ok(Link::Email(EmailLink::from_captures(&caps)));
         }
-        Err(ParseLinkError)
+        Err(NoteHandlerError::InvalidLink)
     }
 }
 
@@ -231,22 +230,23 @@ impl FromStr for Link {
 // Extraction
 // ---------------------------------------------------------------------------
 
-impl Link {
-    /// Extract all links from a text block.
-    pub fn extract(content: &str) -> Vec<Link> {
-        let mut links = Vec::new();
+impl ExtractFrom for Link {
+    type Output = HashSet<Link>;
 
-        for caps in WIKILINK_RE.captures_iter(content) {
-            links.push(Link::Wiki(WikiLink::from_captures(&caps)));
+    fn extract_from(text: &str) -> Self::Output {
+        let mut links = HashSet::new();
+
+        for caps in WIKILINK_RE.captures_iter(text) {
+            links.insert(Link::Wiki(WikiLink::from_captures(&caps)));
         }
-        for caps in MD_LINK_RE.captures_iter(content) {
-            links.push(Link::Markdown(MarkdownLink::from_captures(&caps)));
+        for caps in MD_LINK_RE.captures_iter(text) {
+            links.insert(Link::Markdown(MarkdownLink::from_captures(&caps)));
         }
-        for caps in AUTOLINK_URL_RE.captures_iter(content) {
-            links.push(Link::Url(UrlLink::from_captures(&caps)));
+        for caps in AUTOLINK_URL_RE.captures_iter(text) {
+            links.insert(Link::Url(UrlLink::from_captures(&caps)));
         }
-        for caps in AUTOLINK_EMAIL_RE.captures_iter(content) {
-            links.push(Link::Email(EmailLink::from_captures(&caps)));
+        for caps in AUTOLINK_EMAIL_RE.captures_iter(text) {
+            links.insert(Link::Email(EmailLink::from_captures(&caps)));
         }
 
         links
@@ -439,36 +439,52 @@ mod tests {
     #[test]
     fn extract_from_text() {
         let content = "See [[wiki]], [note](./other.md) and [google](https://google.com).\n";
-        let links = Link::extract(content);
+        let links = Link::extract_from(content);
 
         assert_eq!(links.len(), 3);
-        assert!(matches!(&links[0], Link::Wiki(WikiLink { target, .. }) if target == "wiki"));
         assert!(
-            matches!(&links[1], Link::Markdown(MarkdownLink { url, .. }) if url == "./other.md")
+            links
+                .iter()
+                .any(|l| matches!(l, Link::Wiki(WikiLink { target, .. }) if target == "wiki"))
         );
         assert!(
-            matches!(&links[2], Link::Markdown(MarkdownLink { url, .. }) if url == "https://google.com")
+            links.iter().any(
+                |l| matches!(l, Link::Markdown(MarkdownLink { url, .. }) if url == "./other.md")
+            )
         );
+        assert!(links.iter().any(
+            |l| matches!(l, Link::Markdown(MarkdownLink { url, .. }) if url == "https://google.com")
+        ));
+    }
+
+    #[test]
+    fn from_str_invalid_returns_error() {
+        let result: Result<Link, _> = "just plain text".parse();
+        assert!(matches!(result, Err(NoteHandlerError::InvalidLink)));
+    }
+
+    #[test]
+    fn from_str_empty_string_returns_error() {
+        let result: Result<Link, _> = "".parse();
+        assert!(matches!(result, Err(NoteHandlerError::InvalidLink)));
+    }
+
+    #[test]
+    fn extract_from_empty_text() {
+        let links = Link::extract_from("");
+        assert!(links.is_empty());
     }
 
     #[test]
     fn extract_wikilink_variants() {
         let content = "See [[note]], [[note|alias]], [[note#heading]], [[note^block]], and [[note#heading|alias]].\n";
-        let links = Link::extract(content);
+        let links = Link::extract_from(content);
 
         assert_eq!(links.len(), 5);
-        assert!(matches!(&links[0], Link::Wiki(w) if w.target == "note" && w.alias.is_none()));
-        assert!(
-            matches!(&links[1], Link::Wiki(WikiLink { target, alias, .. }) if target == "note" && alias.as_deref() == Some("alias"))
-        );
-        assert!(
-            matches!(&links[2], Link::Wiki(WikiLink { target, heading, .. }) if target == "note" && heading.as_deref() == Some("heading"))
-        );
-        assert!(
-            matches!(&links[3], Link::Wiki(WikiLink { target, block_ref, .. }) if target == "note" && block_ref.as_deref() == Some("block"))
-        );
-        assert!(
-            matches!(&links[4], Link::Wiki(WikiLink { target, heading, alias, .. }) if target == "note" && heading.as_deref() == Some("heading") && alias.as_deref() == Some("alias"))
-        );
+        assert!(links.iter().any(|l| matches!(l, Link::Wiki(w) if w.target == "note" && w.alias.is_none() && w.heading.is_none() && w.block_ref.is_none())));
+        assert!(links.iter().any(|l| matches!(l, Link::Wiki(WikiLink { target, alias, heading, block_ref, .. }) if target == "note" && alias.as_deref() == Some("alias") && heading.is_none() && block_ref.is_none())));
+        assert!(links.iter().any(|l| matches!(l, Link::Wiki(WikiLink { target, heading, alias, block_ref, .. }) if target == "note" && heading.as_deref() == Some("heading") && alias.is_none() && block_ref.is_none())));
+        assert!(links.iter().any(|l| matches!(l, Link::Wiki(WikiLink { target, block_ref, heading, alias, .. }) if target == "note" && block_ref.as_deref() == Some("block") && heading.is_none() && alias.is_none())));
+        assert!(links.iter().any(|l| matches!(l, Link::Wiki(WikiLink { target, heading, alias, block_ref, .. }) if target == "note" && heading.as_deref() == Some("heading") && alias.as_deref() == Some("alias") && block_ref.is_none())));
     }
 }

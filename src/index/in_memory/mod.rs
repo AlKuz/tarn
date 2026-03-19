@@ -230,17 +230,17 @@ impl InMemoryIndex {
 
             // Combine frontmatter tags with inline tags
             let mut all_tags: Vec<String> = frontmatter_tags.clone();
-            all_tags.extend(section.tags.iter().cloned());
+            all_tags.extend(section.tags.iter().map(|t| t.name().to_string()));
 
             // Convert links to IndexLink
-            let links: Vec<IndexLink> = section.links.iter().map(|link| link.into()).collect();
+            let links: Vec<IndexLink> = section.links.iter().map(IndexLink::from).collect();
 
             let entry = SectionEntry {
                 note_path: note_path.clone(),
                 heading_path: section.heading_path.clone(),
                 tags: all_tags.clone(),
                 links,
-                word_count: section.word_count,
+                word_count: section.word_count(),
                 revision: crate::common::RevisionToken::from(chrono::Utc::now().to_rfc3339()),
             };
 
