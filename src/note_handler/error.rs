@@ -5,7 +5,9 @@ pub enum NoteHandlerError {
     #[error("invalid frontmatter YAML: {0}")]
     InvalidFrontmatter(String),
 
-    #[error("invalid tag `{tag}`: must contain only alphanumeric characters, underscores, hyphens, or slashes, and cannot be purely numeric")]
+    #[error(
+        "invalid tag `{tag}`: must contain only alphanumeric characters, underscores, hyphens, or slashes, and cannot be purely numeric"
+    )]
     InvalidTag { tag: String },
 
     #[error("not a recognized link syntax")]

@@ -219,7 +219,8 @@ mod tests {
 
     #[test]
     fn frontmatter_with_description_and_aliases() {
-        let content = "---\ntitle: Test\ndescription: A description\naliases:\n  - alias1\n  - alias2\n---\n";
+        let content =
+            "---\ntitle: Test\ndescription: A description\naliases:\n  - alias1\n  - alias2\n---\n";
         let (fm, _) = split_frontmatter(content);
         let fm = fm.unwrap();
         assert_eq!(fm.description, Some("A description".to_string()));
