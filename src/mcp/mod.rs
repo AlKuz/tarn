@@ -11,6 +11,9 @@
 //! - `tarn_search_notes` - Full-text search with BM25 ranking (if index configured)
 //! - `tarn_list_notes` - List notes with folder/tag filtering and pagination
 //! - `tarn_get_tags` - Get tag hierarchy with usage statistics
+//! - `tarn_create_note` - Create a new note (fails if already exists)
+//! - `tarn_update_note` - Update an existing note with revision-based conflict detection
+//! - `tarn_replace_in_note` - Replace text within a note (first, all, or regex modes)
 //!
 //! ## Resources
 //!

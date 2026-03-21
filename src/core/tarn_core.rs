@@ -1,7 +1,7 @@
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-
-use serde::Serialize;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
@@ -28,6 +28,8 @@ pub enum CoreError {
     NotMarkdown(VaultPath),
     #[error("index not configured")]
     IndexNotConfigured,
+    #[error("invalid regex: {0}")]
+    InvalidRegex(#[from] regex::Error),
 }
 
 // --- Response types ---
@@ -137,6 +139,20 @@ pub struct FolderInfo {
 pub struct VaultFoldersResponse {
     pub folder: Option<VaultPath>,
     pub folders: Vec<FolderInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplaceMode {
+    First,
+    All,
+    Regex,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WriteNoteResponse {
+    pub path: String,
+    pub revision: RevisionToken,
 }
 
 #[derive(Debug, Serialize)]
@@ -602,6 +618,103 @@ impl TarnCore {
         })
     }
 
+    fn validate_note_path(path: &str) -> Result<VaultPath, CoreError> {
+        let vault_path: VaultPath = path.try_into().map_err(StorageError::from)?;
+        if !vault_path.is_note() {
+            return Err(CoreError::NotMarkdown(vault_path));
+        }
+        Ok(vault_path)
+    }
+
+    pub async fn create_note(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<WriteNoteResponse, CoreError> {
+        let vault_path = Self::validate_note_path(path)?;
+        if self.storage.exists(&vault_path).await? {
+            return Err(StorageError::FileAlreadyExists(vault_path).into());
+        }
+        let revision = self
+            .storage
+            .write(
+                &vault_path,
+                FileContent::Markdown(content.to_string()),
+                None,
+            )
+            .await?;
+        Ok(WriteNoteResponse {
+            path: path.to_string(),
+            revision,
+        })
+    }
+
+    pub async fn update_note(
+        &self,
+        path: &str,
+        content: &str,
+        revision: RevisionToken,
+    ) -> Result<WriteNoteResponse, CoreError> {
+        let vault_path = Self::validate_note_path(path)?;
+        let new_revision = self
+            .storage
+            .write(
+                &vault_path,
+                FileContent::Markdown(content.to_string()),
+                Some(revision),
+            )
+            .await?;
+        Ok(WriteNoteResponse {
+            path: path.to_string(),
+            revision: new_revision,
+        })
+    }
+
+    pub async fn replace_in_note(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        mode: ReplaceMode,
+        revision: RevisionToken,
+    ) -> Result<WriteNoteResponse, CoreError> {
+        let vault_path = Self::validate_note_path(path)?;
+
+        let file = self.storage.read(&vault_path).await?;
+        let current_content = match &file.content {
+            FileContent::Markdown(c) => c.clone(),
+            FileContent::Image(_) => return Err(CoreError::NotMarkdown(vault_path)),
+        };
+
+        if file.meta.revision_token != revision {
+            return Err(
+                StorageError::Conflict(vault_path, revision, file.meta.revision_token).into(),
+            );
+        }
+
+        let new_content = match mode {
+            ReplaceMode::First => current_content.replacen(old, new, 1),
+            ReplaceMode::All => current_content.replace(old, new),
+            ReplaceMode::Regex => {
+                let re = Regex::new(old).map_err(CoreError::InvalidRegex)?;
+                re.replace_all(&current_content, new).into_owned()
+            }
+        };
+
+        let new_revision = self
+            .storage
+            .write(
+                &vault_path,
+                FileContent::Markdown(new_content),
+                Some(file.meta.revision_token),
+            )
+            .await?;
+        Ok(WriteNoteResponse {
+            path: path.to_string(),
+            revision: new_revision,
+        })
+    }
+
     pub async fn read_note(
         &self,
         path: &str,
@@ -1005,5 +1118,197 @@ impl TarnCore {
             word_count: note.word_count(),
             tags,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::builder::TarnBuilder;
+    use tempfile::TempDir;
+
+    fn setup() -> (TempDir, TarnCore) {
+        let dir = TempDir::new().unwrap();
+        let core = TarnBuilder::local(dir.path().to_path_buf()).build();
+        (dir, core)
+    }
+
+    #[tokio::test]
+    async fn test_create_note_success() {
+        let (_dir, core) = setup();
+        let resp = core
+            .create_note("hello.md", "# Hello\nWorld")
+            .await
+            .unwrap();
+        assert_eq!(resp.path, "hello.md");
+
+        // Verify content via read
+        let read = core
+            .read_note("hello.md", None, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(read.content.unwrap().trim(), "# Hello\nWorld");
+    }
+
+    #[tokio::test]
+    async fn test_create_note_already_exists() {
+        let (_dir, core) = setup();
+        core.create_note("existing.md", "content").await.unwrap();
+        let err = core.create_note("existing.md", "other").await.unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(StorageError::FileAlreadyExists(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_create_note_not_markdown() {
+        let (_dir, core) = setup();
+        let err = core.create_note("image.png", "data").await.unwrap_err();
+        assert!(matches!(err, CoreError::NotMarkdown(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_note_success() {
+        let (_dir, core) = setup();
+        let created = core.create_note("note.md", "original").await.unwrap();
+        let updated = core
+            .update_note("note.md", "updated content", created.revision)
+            .await
+            .unwrap();
+        assert_eq!(updated.path, "note.md");
+
+        let read = core
+            .read_note("note.md", None, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(read.content.unwrap().trim(), "updated content");
+    }
+
+    #[tokio::test]
+    async fn test_update_note_conflict() {
+        let (_dir, core) = setup();
+        let created = core.create_note("note.md", "original").await.unwrap();
+        // Update once to change the revision
+        core.update_note("note.md", "v2", created.revision.clone())
+            .await
+            .unwrap();
+        // Try to update with the stale revision
+        let err = core
+            .update_note("note.md", "v3", created.revision)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(StorageError::Conflict(_, _, _))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_replace_first() {
+        let (_dir, core) = setup();
+        let created = core
+            .create_note("note.md", "foo bar foo baz")
+            .await
+            .unwrap();
+        core.replace_in_note(
+            "note.md",
+            "foo",
+            "qux",
+            ReplaceMode::First,
+            created.revision,
+        )
+        .await
+        .unwrap();
+
+        let read = core
+            .read_note("note.md", None, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(read.content.unwrap().trim(), "qux bar foo baz");
+    }
+
+    #[tokio::test]
+    async fn test_replace_all() {
+        let (_dir, core) = setup();
+        let created = core
+            .create_note("note.md", "foo bar foo baz")
+            .await
+            .unwrap();
+        core.replace_in_note("note.md", "foo", "qux", ReplaceMode::All, created.revision)
+            .await
+            .unwrap();
+
+        let read = core
+            .read_note("note.md", None, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(read.content.unwrap().trim(), "qux bar qux baz");
+    }
+
+    #[tokio::test]
+    async fn test_replace_regex() {
+        let (_dir, core) = setup();
+        let created = core
+            .create_note("note.md", "date: 2024-01-15 and 2024-02-20")
+            .await
+            .unwrap();
+        core.replace_in_note(
+            "note.md",
+            r"\d{4}-\d{2}-\d{2}",
+            "REDACTED",
+            ReplaceMode::Regex,
+            created.revision,
+        )
+        .await
+        .unwrap();
+
+        let read = core
+            .read_note("note.md", None, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(read.content.unwrap().trim(), "date: REDACTED and REDACTED");
+    }
+
+    #[tokio::test]
+    async fn test_replace_invalid_regex() {
+        let (_dir, core) = setup();
+        let created = core.create_note("note.md", "content").await.unwrap();
+        let err = core
+            .replace_in_note(
+                "note.md",
+                r"[invalid",
+                "new",
+                ReplaceMode::Regex,
+                created.revision,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidRegex(_)));
+    }
+
+    #[tokio::test]
+    async fn test_replace_conflict() {
+        let (_dir, core) = setup();
+        let created = core.create_note("note.md", "hello world").await.unwrap();
+        // Update to change revision
+        core.update_note("note.md", "changed", created.revision.clone())
+            .await
+            .unwrap();
+        // Replace with stale revision
+        let err = core
+            .replace_in_note(
+                "note.md",
+                "changed",
+                "new",
+                ReplaceMode::First,
+                created.revision,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Storage(StorageError::Conflict(_, _, _))
+        ));
     }
 }
