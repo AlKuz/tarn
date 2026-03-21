@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/AlKuz/tarn/compare/v0.2.3...v0.3.0) (2026-03-21)
+
+
+### Features
+
+* write operations ([#22](https://github.com/AlKuz/tarn/issues/22)) ([ea82789](https://github.com/AlKuz/tarn/commit/ea82789cb584a1c3359ea25cf0e00cd51d457a81))
+
 ## [0.2.3](https://github.com/AlKuz/tarn/compare/v0.2.2...v0.2.3) (2026-03-19)
 
 
