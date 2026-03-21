@@ -2,7 +2,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
@@ -697,7 +696,7 @@ impl TarnCore {
             ReplaceMode::First => current_content.replacen(old, new, 1),
             ReplaceMode::All => current_content.replace(old, new),
             ReplaceMode::Regex => {
-                let re = Regex::new(old).map_err(|e| CoreError::InvalidRegex(e))?;
+                let re = Regex::new(old).map_err(CoreError::InvalidRegex)?;
                 re.replace_all(&current_content, new).into_owned()
             }
         };
