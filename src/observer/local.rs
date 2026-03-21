@@ -41,12 +41,6 @@ async fn try_revision_token(root: &Path, path: &VaultPath) -> Option<RevisionTok
     }
 }
 
-// Check if a path looks like a file (has extension) for delete events
-// where we can't check metadata since the file is gone
-fn looks_like_file(path: &VaultPath) -> bool {
-    path.extension().is_some()
-}
-
 impl Observer for LocalStorageObserver {
     async fn observe(&self) -> Result<impl Stream<Item = StorageEvent>, ObserverError> {
         // Canonicalize root to match paths from notify (which are canonical on macOS)
@@ -104,7 +98,7 @@ impl Observer for LocalStorageObserver {
                     EventKind::Remove(_) => {
                         for path in paths {
                             // For deletes, we can't check metadata, so use heuristic
-                            if looks_like_file(&path) {
+                            if !path.is_folder() {
                                 yield StorageEvent::Deleted { path };
                             }
                         }
