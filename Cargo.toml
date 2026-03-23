@@ -24,7 +24,14 @@ anyhow = "~1.0"
 tracing = "~0.1"
 tracing-subscriber = { version = "~0.3", features = ["env-filter"] }
 tokio-util = "~0.7"
-tokenizers = { version = "~0.22", default-features = false, features = ["http", "fancy-regex"] }
+tokenizers = { version = "~0.22", default-features = false, features = ["http", "fancy-regex"], optional = true }
+rust-stemmers = { version = "~1.2", optional = true }
+lingua = { version = "~1.8", default-features = false, features = ["english", "french", "german", "spanish", "italian", "portuguese", "dutch", "russian"], optional = true }
+
+[features]
+default = []
+hf-tokenizer = ["dep:tokenizers"]
+stemming = ["dep:rust-stemmers", "dep:lingua"]
 
 [[bin]]
 name = "tarn-mcp"

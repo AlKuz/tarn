@@ -269,7 +269,7 @@ mod index_sync {
         let dir = TempDir::new().unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index("bert-base-uncased")
+            .with_index(tarn::index::IndexConfig::default())
             .build_async()
             .await
             .unwrap();
@@ -312,7 +312,7 @@ mod index_sync {
         .unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index("bert-base-uncased")
+            .with_index(tarn::index::IndexConfig::default())
             .build_async()
             .await
             .unwrap();
@@ -366,7 +366,7 @@ mod index_sync {
         .unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index("bert-base-uncased")
+            .with_index(tarn::index::IndexConfig::default())
             .build_async()
             .await
             .unwrap();
@@ -403,7 +403,7 @@ mod index_sync {
         let dir = TempDir::new().unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index("bert-base-uncased")
+            .with_index(tarn::index::IndexConfig::default())
             .build_async()
             .await
             .unwrap();

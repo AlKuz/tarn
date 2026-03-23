@@ -1,4 +1,4 @@
-//! BM25 full-text search index using HuggingFace tokenizers.
+//! BM25 full-text search index with pluggable tokenizers.
 
 use std::collections::HashMap;
 
@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::SectionId;
+use crate::common::Buildable;
+use crate::tokenizer::{Tokenizer, TokenizerConfig};
 
 /// BM25 algorithm parameters.
 const K1: f32 = 1.2; // Term frequency saturation
@@ -14,8 +16,8 @@ const B: f32 = 0.75; // Document length normalization
 /// Errors from BM25 index operations.
 #[derive(Debug, Error)]
 pub enum BM25Error {
-    #[error("failed to load tokenizer '{0}': {1}")]
-    TokenizerLoad(String, String),
+    #[error("tokenizer error: {0}")]
+    Tokenizer(#[from] crate::tokenizer::TokenizerError),
 }
 
 /// Document data stored for BM25 scoring.
@@ -29,10 +31,14 @@ pub struct DocumentData {
 
 /// BM25 full-text search index.
 ///
-/// Uses HuggingFace tokenizers for text processing. Stores inverted index
+/// Generic over `T: Tokenizer` for text processing. Stores inverted index
 /// for efficient term lookup and document data for BM25 scoring.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BM25Index {
+#[serde(bound(
+    serialize = "T: Serialize",
+    deserialize = "T: serde::de::DeserializeOwned"
+))]
+pub struct BM25Index<T: Tokenizer> {
     /// term -> [(section_id, term_frequency)]
     inverted: HashMap<String, Vec<(SectionId, u32)>>,
     /// section_id -> DocumentData
@@ -41,38 +47,19 @@ pub struct BM25Index {
     doc_count: usize,
     /// Sum of all document lengths (for avgdl calculation)
     total_doc_length: u64,
-    /// Tokenizer model ID (stored for persistence)
-    tokenizer_id: String,
-    /// Tokenizer instance (not serialized, recreated on load)
-    #[serde(skip)]
-    tokenizer: Option<tokenizers::Tokenizer>,
+    /// Tokenizer instance
+    tokenizer: T,
 }
 
-impl BM25Index {
-    /// Create a new BM25 index with the specified HuggingFace tokenizer.
-    ///
-    /// # Arguments
-    ///
-    /// * `tokenizer_id` - HuggingFace model ID (e.g., "bert-base-uncased")
-    pub fn new(tokenizer_id: &str) -> Result<Self, BM25Error> {
-        let tokenizer = load_tokenizer(tokenizer_id)?;
-
-        Ok(Self {
+impl<T: Tokenizer> BM25Index<T> {
+    pub fn new(tokenizer: T) -> Self {
+        Self {
             inverted: HashMap::new(),
             documents: HashMap::new(),
             doc_count: 0,
             total_doc_length: 0,
-            tokenizer_id: tokenizer_id.to_string(),
-            tokenizer: Some(tokenizer),
-        })
-    }
-
-    /// Reinitialize the tokenizer after deserialization.
-    pub fn init_tokenizer(&mut self) -> Result<(), BM25Error> {
-        if self.tokenizer.is_none() {
-            self.tokenizer = Some(load_tokenizer(&self.tokenizer_id)?);
+            tokenizer,
         }
-        Ok(())
     }
 
     /// Add a document to the index.
@@ -181,70 +168,35 @@ impl BM25Index {
         self.total_doc_length = 0;
     }
 
-    /// Get the tokenizer ID.
-    pub fn tokenizer_id(&self) -> &str {
-        &self.tokenizer_id
-    }
-
     /// Check if a section is indexed.
     pub fn contains(&self, section_id: &SectionId) -> bool {
         self.documents.contains_key(section_id)
     }
 
-    /// Clone the index without the tokenizer (for serialization).
-    pub fn clone_for_snapshot(&self) -> Self {
-        Self {
-            inverted: self.inverted.clone(),
-            documents: self.documents.clone(),
-            doc_count: self.doc_count,
-            total_doc_length: self.total_doc_length,
-            tokenizer_id: self.tokenizer_id.clone(),
-            tokenizer: None, // Not serialized
-        }
+    /// Get the document length (token count) for a section.
+    pub fn doc_length(&self, section_id: &SectionId) -> Option<u32> {
+        self.documents.get(section_id).map(|d| d.doc_length)
     }
 
-    /// Tokenize text using the HuggingFace tokenizer.
+    /// Tokenize text using the stored tokenizer.
     fn tokenize(&self, text: &str) -> Vec<String> {
-        let Some(tokenizer) = &self.tokenizer else {
-            return Vec::new();
-        };
-
-        let encoding = match tokenizer.encode(text, false) {
-            Ok(e) => e,
-            Err(_) => return Vec::new(),
-        };
-
-        encoding
-            .get_tokens()
-            .iter()
-            .filter(|t| !is_special_token(t))
-            .map(|t| normalize_token(t))
-            .filter(|t| !t.is_empty())
-            .collect()
+        self.tokenizer.tokenize(text)
     }
 }
 
-/// Load a HuggingFace tokenizer by model ID.
-fn load_tokenizer(tokenizer_id: &str) -> Result<tokenizers::Tokenizer, BM25Error> {
-    tokenizers::Tokenizer::from_pretrained(tokenizer_id, None)
-        .map_err(|e| BM25Error::TokenizerLoad(tokenizer_id.to_string(), e.to_string()))
-}
-
-/// Check if a token is a special token (e.g., [CLS], [SEP], [PAD]).
-fn is_special_token(token: &str) -> bool {
-    token.starts_with('[') && token.ends_with(']')
-}
-
-/// Normalize a token for consistent matching.
-fn normalize_token(token: &str) -> String {
-    // Handle WordPiece continuation markers (##)
-    token.trim_start_matches("##").to_lowercase()
+impl BM25Index<Box<dyn Tokenizer>> {
+    /// Create a new BM25 index from a tokenizer config.
+    pub fn from_config(config: TokenizerConfig) -> Result<Self, BM25Error> {
+        let tokenizer = config.build()?;
+        Ok(Self::new(tokenizer))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::VaultPath;
+    use crate::tokenizer::NaiveTokenizer;
 
     fn section_id(path: &str, headings: &[&str]) -> SectionId {
         let vault_path = VaultPath::new(path).unwrap();
@@ -252,9 +204,13 @@ mod tests {
         SectionId::new(&vault_path, &heading_path)
     }
 
+    fn make_index() -> BM25Index<NaiveTokenizer> {
+        BM25Index::new(NaiveTokenizer::new())
+    }
+
     #[test]
     fn add_and_search() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         let s1 = section_id("rust-guide.md", &["Introduction"]);
         let s2 = section_id("python-guide.md", &["Introduction"]);
@@ -269,16 +225,13 @@ mod tests {
 
         let results = index.search("rust programming", 10);
 
-        // Should find documents mentioning Rust
         assert!(!results.is_empty());
-
-        // First result should be s1 (most relevant - has both "rust" and "programming")
         assert_eq!(results[0].0, s1);
     }
 
     #[test]
     fn remove_document() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         let s1 = section_id("note.md", &[]);
         index.add_document(s1.clone(), "Rust programming language");
@@ -293,7 +246,7 @@ mod tests {
 
     #[test]
     fn clear_removes_all() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         let s1 = section_id("note.md", &[]);
         index.add_document(s1.clone(), "Rust programming");
@@ -306,7 +259,7 @@ mod tests {
 
     #[test]
     fn empty_query_returns_empty() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         let s1 = section_id("note.md", &[]);
         index.add_document(s1, "Some content");
@@ -316,7 +269,7 @@ mod tests {
 
     #[test]
     fn search_respects_limit() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         for i in 0..10 {
             let s = section_id(&format!("note{i}.md"), &[]);
@@ -329,26 +282,22 @@ mod tests {
 
     #[test]
     fn bm25_scores_term_frequency() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         let s1 = section_id("note1.md", &[]);
         let s2 = section_id("note2.md", &[]);
 
-        // s1 mentions "rust" once
         index.add_document(s1.clone(), "Rust is great.");
-        // s2 mentions "rust" multiple times
         index.add_document(s2.clone(), "Rust Rust Rust is the best Rust language.");
 
         let results = index.search("rust", 10);
 
-        // s2 should score higher due to higher term frequency
         assert!(results.len() >= 2);
-        // Note: BM25 has term frequency saturation, so it won't be linear
     }
 
     #[test]
     fn update_document_replaces_content() {
-        let mut index = BM25Index::new("bert-base-uncased").unwrap();
+        let mut index = make_index();
 
         let s1 = section_id("note.md", &[]);
 
@@ -356,9 +305,38 @@ mod tests {
         assert!(index.search("python", 10).len() == 1);
         assert!(index.search("rust", 10).is_empty());
 
-        // Update with new content
         index.add_document(s1.clone(), "Rust programming");
         assert!(index.search("rust", 10).len() == 1);
         assert!(index.search("python", 10).is_empty());
+    }
+
+    #[test]
+    fn doc_length_returns_token_count() {
+        let mut index = make_index();
+
+        let s1 = section_id("note.md", &[]);
+        index.add_document(s1.clone(), "hello world foo");
+
+        assert_eq!(index.doc_length(&s1), Some(3));
+    }
+
+    #[test]
+    fn from_config_naive() {
+        let mut index = BM25Index::from_config(TokenizerConfig::Naive).unwrap();
+        let s1 = section_id("note.md", &[]);
+        index.add_document(s1.clone(), "hello world");
+        assert!(!index.search("hello", 10).is_empty());
+    }
+
+    #[cfg(feature = "hf-tokenizer")]
+    #[test]
+    fn from_config_hf() {
+        let mut index = BM25Index::from_config(TokenizerConfig::HuggingFace {
+            model_id: "bert-base-uncased".to_string(),
+        })
+        .unwrap();
+        let s1 = section_id("note.md", &[]);
+        index.add_document(s1.clone(), "Rust programming");
+        assert!(!index.search("rust", 10).is_empty());
     }
 }

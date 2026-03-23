@@ -11,6 +11,7 @@ use rmcp::transport::streamable_http_server::{
 use tokio::task::JoinHandle;
 
 use tarn::TarnBuilder;
+use tarn::index::IndexConfig;
 use tarn::mcp::TarnMcpServer;
 
 #[derive(Clone, ValueEnum)]
@@ -121,10 +122,11 @@ async fn main() -> anyhow::Result<()> {
             TarnBuilder::from_env()?
         };
 
+        let index_config = IndexConfig::default();
         builder = if let Some(index_path) = cli.index_path {
-            builder.with_persistent_index("default", index_path)
+            builder.with_persistent_index(index_config, index_path)
         } else {
-            builder.with_index("default")
+            builder.with_index(index_config)
         };
 
         let core = Arc::new(builder.build_async().await?);

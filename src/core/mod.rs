@@ -3,7 +3,7 @@ pub(crate) mod config;
 pub mod tarn_core;
 
 // Re-export builder types
-pub use builder::{BuildError, IndexConfig};
+pub use builder::BuildError;
 
 // Re-export for backward compatibility within crate
 pub use crate::common;
