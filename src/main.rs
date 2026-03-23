@@ -122,12 +122,11 @@ async fn main() -> anyhow::Result<()> {
             TarnBuilder::from_env()?
         };
 
-        let index_config = IndexConfig::default();
-        builder = if let Some(index_path) = cli.index_path {
-            builder.with_persistent_index(index_config, index_path)
-        } else {
-            builder.with_index(index_config)
+        let index_config = IndexConfig::InMemory {
+            tokenizer: Default::default(),
+            persistence_path: cli.index_path,
         };
+        builder = builder.with_index(index_config);
 
         let core = Arc::new(builder.build_async().await?);
 
