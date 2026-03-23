@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/AlKuz/tarn/compare/v0.4.0...v0.5.0) (2026-03-23)
+
+
+### Features
+
+* added gated tokenizer, fixed index ([#25](https://github.com/AlKuz/tarn/issues/25)) ([77c6c8c](https://github.com/AlKuz/tarn/commit/77c6c8cdee40ae787c59cba3f9123dd1496c4f9b))
+
 ## [0.4.0](https://github.com/AlKuz/tarn/compare/v0.3.0...v0.4.0) (2026-03-21)
 
 
