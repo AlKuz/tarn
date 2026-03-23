@@ -4,16 +4,15 @@
 //! It supports multiple backends: InMemoryStore, SqliteStore, DynamoDbStore, PostgresStore.
 
 pub mod in_memory;
-mod tokenizer;
 
 pub use in_memory::{InMemoryIndex, SectionId};
-pub use tokenizer::{NaiveTokenizer, Tokenizer};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::{Buildable, Configurable, RevisionToken, VaultPath};
 use crate::note_handler::Note;
+use crate::tokenizer::TokenizerConfig;
 
 // ---------------------------------------------------------------------------
 // Search parameters
@@ -92,8 +91,9 @@ pub struct IndexMeta {
     pub note_count: usize,
     /// Timestamp of last indexing operation.
     pub last_indexed: Option<chrono::DateTime<chrono::Utc>>,
-    /// HuggingFace tokenizer model ID (e.g., "bert-base-uncased").
-    pub tokenizer_id: String,
+    /// Tokenizer configuration used for this index.
+    #[serde(default)]
+    pub tokenizer_config: TokenizerConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +118,40 @@ pub enum IndexError {
 }
 
 // ---------------------------------------------------------------------------
+// Index config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IndexConfig {
+    InMemory {
+        #[serde(default)]
+        tokenizer: TokenizerConfig,
+    },
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        IndexConfig::InMemory {
+            tokenizer: TokenizerConfig::default(),
+        }
+    }
+}
+
+impl Buildable for IndexConfig {
+    type Target = InMemoryIndex;
+    type Error = IndexError;
+
+    fn build(&self) -> Result<Self::Target, Self::Error> {
+        match self {
+            IndexConfig::InMemory { .. } => {
+                InMemoryIndex::new(self.clone()).map_err(|e| IndexError::Backend(e.to_string()))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Index trait
 // ---------------------------------------------------------------------------
 
@@ -137,7 +171,7 @@ pub enum IndexError {
 /// - **BM25 keyword search**: The `search` method supports relevance-ranked results.
 /// - **Graph queries**: Backlinks and forward links enable knowledge graph traversal.
 #[allow(async_fn_in_trait)]
-pub trait Index: Send + Sync {
+pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
     // -------------------------------------------------------------------------
     // CRUD operations
     // -------------------------------------------------------------------------
@@ -151,16 +185,8 @@ pub trait Index: Send + Sync {
     /// for that note path.
     async fn update(&self, note: &Note) -> Result<(), IndexError>;
 
-    /// Update the index with multiple notes.
-    ///
-    /// More efficient than calling `update` repeatedly for bulk operations.
-    async fn update_bulk(&self, notes: &[Note]) -> Result<(), IndexError>;
-
     /// Remove all indexed sections for a note.
     async fn remove(&self, path: &VaultPath) -> Result<(), IndexError>;
-
-    /// Remove indexed sections for multiple notes.
-    async fn remove_bulk(&self, paths: &[VaultPath]) -> Result<(), IndexError>;
 
     // -------------------------------------------------------------------------
     // Search operations
@@ -216,4 +242,12 @@ pub trait Index: Send + Sync {
 
     /// Count the total number of indexed sections.
     async fn count(&self) -> Result<usize, IndexError>;
+
+    /// Update the index with multiple notes.
+    ///
+    /// More efficient than calling `update` repeatedly for bulk operations.
+    async fn update_bulk(&self, notes: &[Note]) -> Result<(), IndexError>;
+
+    /// Remove indexed sections for multiple notes.
+    async fn remove_bulk(&self, paths: &[VaultPath]) -> Result<(), IndexError>;
 }

@@ -3,30 +3,25 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::common::Buildable;
 use crate::core::config::{Config, ConfigError, LocalStorageConfig, StorageConfig};
-use crate::index::InMemoryIndex;
 use crate::index::in_memory::InMemoryIndexError;
+use crate::index::{InMemoryIndex, IndexConfig, IndexError};
 use crate::storage::local::LocalStorage;
-
-/// Configuration for the index.
-#[derive(Clone)]
-pub enum IndexConfig {
-    /// Ephemeral in-memory index (lost on restart).
-    InMemory { tokenizer_id: String },
-    /// Persistent in-memory index (saved to disk).
-    Persistent { tokenizer_id: String, path: PathBuf },
-}
 
 /// Errors that can occur during TarnCore build.
 #[derive(Debug, Error)]
 pub enum BuildError {
     #[error("index initialization failed: {0}")]
     Index(#[from] InMemoryIndexError),
+    #[error("index build failed: {0}")]
+    IndexBuild(#[from] IndexError),
 }
 
 pub struct TarnBuilder {
     config: Config,
     index_config: Option<IndexConfig>,
+    index_persistence_path: Option<PathBuf>,
 }
 
 impl TarnBuilder {
@@ -34,6 +29,7 @@ impl TarnBuilder {
         TarnBuilder {
             config,
             index_config: None,
+            index_persistence_path: None,
         }
     }
 
@@ -50,19 +46,15 @@ impl TarnBuilder {
     }
 
     /// Configure an ephemeral in-memory index.
-    pub fn with_index(mut self, tokenizer_id: &str) -> Self {
-        self.index_config = Some(IndexConfig::InMemory {
-            tokenizer_id: tokenizer_id.to_string(),
-        });
+    pub fn with_index(mut self, config: IndexConfig) -> Self {
+        self.index_config = Some(config);
         self
     }
 
     /// Configure a persistent in-memory index.
-    pub fn with_persistent_index(mut self, tokenizer_id: &str, path: PathBuf) -> Self {
-        self.index_config = Some(IndexConfig::Persistent {
-            tokenizer_id: tokenizer_id.to_string(),
-            path,
-        });
+    pub fn with_persistent_index(mut self, config: IndexConfig, path: PathBuf) -> Self {
+        self.index_config = Some(config);
+        self.index_persistence_path = Some(path);
         self
     }
 
@@ -79,14 +71,15 @@ impl TarnBuilder {
 
     /// Build TarnCore with async index initialization.
     pub async fn build_async(self) -> Result<TarnCore, BuildError> {
-        let index: Option<Arc<InMemoryIndex>> = match &self.index_config {
+        let index: Option<Arc<InMemoryIndex>> = match self.index_config {
             None => None,
-            Some(IndexConfig::InMemory { tokenizer_id }) => {
-                Some(Arc::new(InMemoryIndex::new(tokenizer_id)?))
+            Some(config) => {
+                let index = match self.index_persistence_path {
+                    Some(path) => InMemoryIndex::with_persistence(path, config).await?,
+                    None => config.build()?,
+                };
+                Some(Arc::new(index))
             }
-            Some(IndexConfig::Persistent { tokenizer_id, path }) => Some(Arc::new(
-                InMemoryIndex::with_persistence(path, tokenizer_id).await?,
-            )),
         };
 
         match self.config.storage {

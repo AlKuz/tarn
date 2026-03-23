@@ -1,20 +1,21 @@
 mod data_uri;
+mod revision_token;
 mod vault_path;
 
 pub use data_uri::DataURI;
+pub use revision_token::RevisionToken;
+use serde::{Serialize, de::DeserializeOwned};
 pub use vault_path::{PathKind, VaultPath, VaultPathError};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RevisionToken(String);
+pub trait Configurable {
+    type Config: Serialize + DeserializeOwned;
 
-impl<T: Into<String>> From<T> for RevisionToken {
-    fn from(value: T) -> Self {
-        Self(value.into())
-    }
+    fn config(&self) -> Self::Config;
 }
 
-impl std::fmt::Display for RevisionToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
+pub trait Buildable: Serialize + DeserializeOwned {
+    type Target: Sized;
+    type Error;
+
+    fn build(&self) -> Result<Self::Target, Self::Error>;
 }

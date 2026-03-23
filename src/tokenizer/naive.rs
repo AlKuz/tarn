@@ -1,32 +1,7 @@
-//! Tokenizer for BM25 full-text search.
-//!
-//! Converts note content into searchable tokens for indexing and query matching.
+//! Simple whitespace-based tokenizer.
 
-// ---------------------------------------------------------------------------
-// Tokenizer trait
-// ---------------------------------------------------------------------------
-
-/// Trait for tokenizing text into searchable tokens.
-///
-/// Implementations convert input text into normalized token sequences suitable
-/// for BM25 indexing. This is a synchronous interface since tokenization is
-/// CPU-bound with no I/O.
-pub trait Tokenizer: Send + Sync {
-    /// Tokenize text into a sequence of normalized tokens.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The input text to tokenize
-    ///
-    /// # Returns
-    ///
-    /// A vector of normalized tokens extracted from the text.
-    fn tokenize(&self, text: &str) -> Vec<String>;
-}
-
-// ---------------------------------------------------------------------------
-// NaiveTokenizer
-// ---------------------------------------------------------------------------
+use super::{Tokenizer, TokenizerConfig};
+use crate::common::Configurable;
 
 /// Simple whitespace-based tokenizer.
 ///
@@ -36,7 +11,6 @@ pub trait Tokenizer: Send + Sync {
 pub struct NaiveTokenizer;
 
 impl NaiveTokenizer {
-    /// Create a new naive tokenizer.
     pub fn new() -> Self {
         Self
     }
@@ -56,60 +30,70 @@ impl Tokenizer for NaiveTokenizer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+impl Configurable for NaiveTokenizer {
+    type Config = TokenizerConfig;
+
+    fn config(&self) -> Self::Config {
+        TokenizerConfig::Naive
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn naive_tokenizer_splits_on_whitespace() {
+    fn splits_on_whitespace() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("hello world");
         assert_eq!(tokens, vec!["hello", "world"]);
     }
 
     #[test]
-    fn naive_tokenizer_lowercases() {
+    fn lowercases() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("Hello WORLD");
         assert_eq!(tokens, vec!["hello", "world"]);
     }
 
     #[test]
-    fn naive_tokenizer_handles_multiple_whitespace() {
+    fn handles_multiple_whitespace() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("hello   world\t\nfoo");
         assert_eq!(tokens, vec!["hello", "world", "foo"]);
     }
 
     #[test]
-    fn naive_tokenizer_empty_input() {
+    fn empty_input() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("");
         assert!(tokens.is_empty());
     }
 
     #[test]
-    fn naive_tokenizer_whitespace_only() {
+    fn whitespace_only() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("   \t\n  ");
         assert!(tokens.is_empty());
     }
 
     #[test]
-    fn naive_tokenizer_removes_punctuation() {
+    fn removes_punctuation() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("Hello, world! How's it going?");
         assert_eq!(tokens, vec!["hello", "world", "hows", "it", "going"]);
     }
 
     #[test]
-    fn naive_tokenizer_punctuation_only_tokens() {
+    fn punctuation_only_tokens() {
         let tokenizer = NaiveTokenizer::new();
         let tokens = tokenizer.tokenize("hello ... world");
         assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn get_config_returns_naive() {
+        let tokenizer = NaiveTokenizer::new();
+        assert!(matches!(tokenizer.config(), TokenizerConfig::Naive));
     }
 }
