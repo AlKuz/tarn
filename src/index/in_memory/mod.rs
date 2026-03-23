@@ -776,16 +776,7 @@ mod tests {
         assert_eq!(index.count().await.unwrap(), 1);
         drop(index);
 
-        // Reload with a different tokenizer config — should discard and start fresh
-        let different_config = IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::HuggingFace {
-                model_id: "bert-base-uncased".to_string(),
-            },
-        };
-        // This will fail because hf-tokenizer feature is not enabled,
-        // which is expected — the mismatch path calls InMemoryIndexInner::new
-        // which tries to build the tokenizer.
-        // Instead, verify by tampering the persisted meta directly.
+        // Tamper the persisted meta to simulate a different tokenizer config
         let data = tokio::fs::read(&index_path).await.unwrap();
         let mut snapshot: serde_json::Value = serde_json::from_slice(&data).unwrap();
         snapshot["meta"]["tokenizer_config"] = serde_json::json!({
