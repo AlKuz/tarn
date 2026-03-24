@@ -12,7 +12,7 @@ use tarn::storage::{FileContent, LocalStorage, Storage, StorageError};
 
 fn create_temp_storage() -> (TempDir, LocalStorage) {
     let dir = TempDir::new().unwrap();
-    let storage = LocalStorage::new(dir.path().to_path_buf());
+    let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
     (dir, storage)
 }
 
@@ -993,7 +993,7 @@ mod crlf_support {
             .await
             .unwrap();
 
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
         let path = VaultPath::new("note.md").unwrap();
 
         let file = storage.read(&path).await.unwrap();
@@ -1028,7 +1028,9 @@ mod crlf_support {
         .await
         .unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf()).build();
+        let core = TarnBuilder::local(dir.path().to_path_buf())
+            .build()
+            .unwrap();
 
         // Test vault_tags returns correctly parsed tags
         let tags_response = core.vault_tags(None).await.unwrap();
@@ -1049,7 +1051,9 @@ mod crlf_support {
         .await
         .unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf()).build();
+        let core = TarnBuilder::local(dir.path().to_path_buf())
+            .build()
+            .unwrap();
 
         let results = core
             .search_notes("unique_term_123", None, None, 10, 0)
@@ -1103,7 +1107,7 @@ mod unix_permissions {
     #[tokio::test]
     async fn write_to_readonly_parent_fails() {
         let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
 
         // Create a readonly directory
         let readonly_dir = dir.path().join("readonly");
@@ -1129,7 +1133,7 @@ mod unix_permissions {
     #[tokio::test]
     async fn move_to_readonly_parent_fails() {
         let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
 
         // Create source file
         let from = VaultPath::new("source.md").unwrap();
@@ -1159,7 +1163,7 @@ mod unix_permissions {
     #[tokio::test]
     async fn copy_to_readonly_parent_fails() {
         let dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
 
         // Create source file
         let from = VaultPath::new("source.md").unwrap();
@@ -1184,5 +1188,257 @@ mod unix_permissions {
         std::fs::set_permissions(&readonly_dir, perms).unwrap();
 
         assert!(matches!(result, Err(StorageError::PermissionDenied(_))));
+    }
+}
+
+// =============================================================================
+// Symlink Traversal Prevention (platform-specific)
+// =============================================================================
+
+#[cfg(unix)]
+mod symlink_traversal {
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    use tarn::common::VaultPath;
+    use tarn::storage::{FileContent, LocalStorage, Storage, StorageError};
+
+    #[tokio::test]
+    async fn read_through_symlink_outside_vault_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        // Create a file outside the vault
+        fs::write(outside_dir.path().join("secret.md"), "secret content")
+            .await
+            .unwrap();
+
+        // Create a symlink inside the vault pointing outside
+        let link_path = vault_dir.path().join("escape");
+        std::os::unix::fs::symlink(outside_dir.path(), &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("escape/secret.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_through_symlink_outside_vault_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        // Create a symlink inside the vault pointing outside
+        let link_path = vault_dir.path().join("escape");
+        std::os::unix::fs::symlink(outside_dir.path(), &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("escape/malicious.md").unwrap();
+
+        let result = storage
+            .write(&path, FileContent::Markdown("pwned".into()), None)
+            .await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+
+        // Verify the file was NOT created outside the vault
+        assert!(!outside_dir.path().join("malicious.md").exists());
+    }
+
+    #[tokio::test]
+    async fn symlink_within_vault_is_allowed() {
+        let vault_dir = TempDir::new().unwrap();
+
+        // Create a real directory and file inside the vault
+        let real_dir = vault_dir.path().join("real");
+        fs::create_dir(&real_dir).await.unwrap();
+        fs::write(real_dir.join("note.md"), "# Hello\n\nContent here.")
+            .await
+            .unwrap();
+
+        // Create a symlink inside the vault pointing to another location inside the vault
+        let link_path = vault_dir.path().join("alias");
+        std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("alias/note.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn nested_symlink_escape_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        fs::write(outside_dir.path().join("secret.md"), "secret")
+            .await
+            .unwrap();
+
+        // Create nested directory structure with symlink escape
+        let nested = vault_dir.path().join("a/b");
+        fs::create_dir_all(&nested).await.unwrap();
+        let link_path = nested.join("escape");
+        std::os::unix::fs::symlink(outside_dir.path(), &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("a/b/escape/secret.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn symlink_file_outside_vault_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        let outside_file = outside_dir.path().join("secret.md");
+        fs::write(&outside_file, "secret content").await.unwrap();
+
+        // Create a symlink to a single file outside the vault
+        let link_path = vault_dir.path().join("linked.md");
+        std::os::unix::fs::symlink(&outside_file, &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("linked.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+    }
+}
+
+// =============================================================================
+// Symlink Traversal Prevention (Windows)
+// =============================================================================
+
+#[cfg(windows)]
+mod symlink_traversal {
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    use tarn::common::VaultPath;
+    use tarn::storage::{FileContent, LocalStorage, Storage, StorageError};
+
+    #[tokio::test]
+    async fn read_through_dir_symlink_outside_vault_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        fs::write(outside_dir.path().join("secret.md"), "secret content")
+            .await
+            .unwrap();
+
+        let link_path = vault_dir.path().join("escape");
+        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("escape/secret.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_through_dir_symlink_outside_vault_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        let link_path = vault_dir.path().join("escape");
+        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("escape/malicious.md").unwrap();
+
+        let result = storage
+            .write(&path, FileContent::Markdown("pwned".into()), None)
+            .await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+
+        assert!(!outside_dir.path().join("malicious.md").exists());
+    }
+
+    #[tokio::test]
+    async fn dir_symlink_within_vault_is_allowed() {
+        let vault_dir = TempDir::new().unwrap();
+
+        let real_dir = vault_dir.path().join("real");
+        fs::create_dir(&real_dir).await.unwrap();
+        fs::write(real_dir.join("note.md"), "# Hello\n\nContent here.")
+            .await
+            .unwrap();
+
+        let link_path = vault_dir.path().join("alias");
+        std::os::windows::fs::symlink_dir(&real_dir, &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("alias/note.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn nested_dir_symlink_escape_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        fs::write(outside_dir.path().join("secret.md"), "secret")
+            .await
+            .unwrap();
+
+        let nested = vault_dir.path().join("a\\b");
+        fs::create_dir_all(&nested).await.unwrap();
+        let link_path = nested.join("escape");
+        std::os::windows::fs::symlink_dir(outside_dir.path(), &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("a/b/escape/secret.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_symlink_outside_vault_is_denied() {
+        let vault_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        let outside_file = outside_dir.path().join("secret.md");
+        fs::write(&outside_file, "secret content").await.unwrap();
+
+        let link_path = vault_dir.path().join("linked.md");
+        std::os::windows::fs::symlink_file(&outside_file, &link_path).unwrap();
+
+        let storage = LocalStorage::new(vault_dir.path().to_path_buf()).unwrap();
+        let path = VaultPath::new("linked.md").unwrap();
+
+        let result = storage.read(&path).await;
+        assert!(
+            matches!(result, Err(StorageError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
     }
 }

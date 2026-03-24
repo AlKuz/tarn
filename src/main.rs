@@ -140,9 +140,9 @@ async fn main() -> anyhow::Result<()> {
         (core, Some(handle))
     } else {
         let core = if let Some(vault) = cli.vault {
-            Arc::new(TarnBuilder::local(vault).build())
+            Arc::new(TarnBuilder::local(vault).build()?)
         } else {
-            Arc::new(TarnBuilder::from_env()?.build())
+            Arc::new(TarnBuilder::from_env()?.build()?)
         };
         (core, None)
     };

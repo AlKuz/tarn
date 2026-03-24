@@ -5,9 +5,9 @@
 //!
 //! ## Symlink Handling
 //!
-//! [`LocalStorage`] follows symlinks transparently - symlinked files and directories
-//! are accessed as if they were regular files. However, symlinks pointing outside
-//! the vault root are rejected by path validation to prevent directory traversal.
+//! [`LocalStorage`] resolves symlinks via path canonicalization. Symlinks within the
+//! vault that point to locations inside the vault root are followed transparently.
+//! Symlinks pointing outside the vault root are rejected to prevent directory traversal.
 //!
 //! ## Revision Tokens
 //!
