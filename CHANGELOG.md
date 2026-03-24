@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/AlKuz/tarn/compare/v0.5.0...v0.5.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* traversal attack ([#27](https://github.com/AlKuz/tarn/issues/27)) ([4debfc3](https://github.com/AlKuz/tarn/commit/4debfc3763aafef7b91727096e2c47262657ab76))
+
 ## [0.5.0](https://github.com/AlKuz/tarn/compare/v0.4.0...v0.5.0) (2026-03-23)
 
 
