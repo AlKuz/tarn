@@ -269,7 +269,10 @@ mod index_sync {
         let dir = TempDir::new().unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::default())
+            .with_index(tarn::index::IndexConfig::InMemory {
+                tokenizer: Default::default(),
+                persistence_path: None,
+            })
             .build_async()
             .await
             .unwrap();
@@ -312,7 +315,10 @@ mod index_sync {
         .unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::default())
+            .with_index(tarn::index::IndexConfig::InMemory {
+                tokenizer: Default::default(),
+                persistence_path: None,
+            })
             .build_async()
             .await
             .unwrap();
@@ -366,7 +372,10 @@ mod index_sync {
         .unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::default())
+            .with_index(tarn::index::IndexConfig::InMemory {
+                tokenizer: Default::default(),
+                persistence_path: None,
+            })
             .build_async()
             .await
             .unwrap();
@@ -403,7 +412,10 @@ mod index_sync {
         let dir = TempDir::new().unwrap();
 
         let core = TarnBuilder::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::default())
+            .with_index(tarn::index::IndexConfig::InMemory {
+                tokenizer: Default::default(),
+                persistence_path: None,
+            })
             .build_async()
             .await
             .unwrap();

@@ -10,8 +10,10 @@ pub use in_memory::{InMemoryIndex, SectionId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::common::{Buildable, Configurable, RevisionToken, VaultPath};
+use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::note_handler::Note;
+use std::path::PathBuf;
+
 use crate::tokenizer::TokenizerConfig;
 
 // ---------------------------------------------------------------------------
@@ -127,28 +129,9 @@ pub enum IndexConfig {
     InMemory {
         #[serde(default)]
         tokenizer: TokenizerConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persistence_path: Option<PathBuf>,
     },
-}
-
-impl Default for IndexConfig {
-    fn default() -> Self {
-        IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-        }
-    }
-}
-
-impl Buildable for IndexConfig {
-    type Target = InMemoryIndex;
-    type Error = IndexError;
-
-    fn build(&self) -> Result<Self::Target, Self::Error> {
-        match self {
-            IndexConfig::InMemory { .. } => {
-                InMemoryIndex::new(self.clone()).map_err(|e| IndexError::Backend(e.to_string()))
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

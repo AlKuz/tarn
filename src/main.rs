@@ -122,12 +122,11 @@ async fn main() -> anyhow::Result<()> {
             TarnBuilder::from_env()?
         };
 
-        let index_config = IndexConfig::default();
-        builder = if let Some(index_path) = cli.index_path {
-            builder.with_persistent_index(index_config, index_path)
-        } else {
-            builder.with_index(index_config)
+        let index_config = IndexConfig::InMemory {
+            tokenizer: Default::default(),
+            persistence_path: cli.index_path,
         };
+        builder = builder.with_index(index_config);
 
         let core = Arc::new(builder.build_async().await?);
 
@@ -141,9 +140,9 @@ async fn main() -> anyhow::Result<()> {
         (core, Some(handle))
     } else {
         let core = if let Some(vault) = cli.vault {
-            Arc::new(TarnBuilder::local(vault).build())
+            Arc::new(TarnBuilder::local(vault).build()?)
         } else {
-            Arc::new(TarnBuilder::from_env()?.build())
+            Arc::new(TarnBuilder::from_env()?.build()?)
         };
         (core, None)
     };

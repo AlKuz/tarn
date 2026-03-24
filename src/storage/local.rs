@@ -17,8 +17,37 @@ fn map_io_error(path: &VaultPath, err: std::io::Error) -> StorageError {
     }
 }
 
-fn is_path_safe(root: &Path, resolved: &Path) -> bool {
-    resolved.starts_with(root)
+/// Canonicalizes a path, resolving symlinks for the existing portion.
+///
+/// For paths where not all components exist yet (e.g., writing a new file),
+/// canonicalizes the longest existing ancestor and appends the remaining
+/// components. This ensures symlinks are resolved even for non-existent targets.
+fn safe_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    // Try full canonicalization first (works when path exists)
+    if let Ok(canonical) = path.canonicalize() {
+        return Ok(canonical);
+    }
+
+    // Walk up until we find an existing ancestor
+    let mut remaining = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            // Rebuild the path: canonical ancestor + remaining components
+            let mut result = canonical;
+            for component in remaining.into_iter().rev() {
+                result.push(component);
+            }
+            return Ok(result);
+        }
+        match current.file_name() {
+            Some(name) => {
+                remaining.push(name.to_os_string());
+                current.pop();
+            }
+            None => return path.canonicalize(), // no existing ancestor, fail
+        }
+    }
 }
 
 fn revision_token(
@@ -57,17 +86,20 @@ fn mime_from_extension(ext: &str) -> &'static str {
 
 pub struct LocalStorage {
     path: PathBuf,
+    canonical_root: PathBuf,
     denied_paths: RwLock<HashSet<VaultPath>>,
     read_only_paths: RwLock<HashSet<VaultPath>>,
 }
 
 impl LocalStorage {
-    pub fn new(path: PathBuf) -> Self {
-        LocalStorage {
+    pub fn new(path: PathBuf) -> std::io::Result<Self> {
+        let canonical_root = path.canonicalize()?;
+        Ok(LocalStorage {
             path,
+            canonical_root,
             denied_paths: RwLock::new(HashSet::new()),
             read_only_paths: RwLock::new(HashSet::new()),
-        }
+        })
     }
 
     fn is_denied(&self, path: &VaultPath) -> bool {
@@ -86,10 +118,11 @@ impl LocalStorage {
 
     fn resolve(&self, path: &VaultPath) -> Result<PathBuf, StorageError> {
         let full = self.path.join(path.as_str());
-        if !is_path_safe(&self.path, &full) {
+        let canonical = safe_canonicalize(&full).map_err(|e| map_io_error(path, e))?;
+        if !canonical.starts_with(&self.canonical_root) {
             return Err(StorageError::PermissionDenied(path.clone()));
         }
-        Ok(full)
+        Ok(canonical)
     }
 
     async fn check_revision(
@@ -327,36 +360,69 @@ impl Storage for LocalStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use tempfile::TempDir;
 
     #[test]
-    fn is_path_safe_allows_valid_paths() {
-        let root = Path::new("/vault");
-        assert!(is_path_safe(root, Path::new("/vault/note.md")));
-        assert!(is_path_safe(root, Path::new("/vault/folder/note.md")));
-        assert!(is_path_safe(root, Path::new("/vault/a/b/c/deep.md")));
+    fn safe_canonicalize_existing_path() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = safe_canonicalize(&file).unwrap();
+        assert_eq!(result, file.canonicalize().unwrap());
     }
 
     #[test]
-    fn is_path_safe_rejects_paths_outside_root() {
-        let root = Path::new("/vault");
-        assert!(!is_path_safe(root, Path::new("/etc/passwd")));
-        assert!(!is_path_safe(root, Path::new("/other/vault/note.md")));
-        assert!(!is_path_safe(root, Path::new("/home/user/file.md")));
+    fn safe_canonicalize_nonexistent_file_in_existing_dir() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("new_file.md");
+
+        let result = safe_canonicalize(&file).unwrap();
+        let expected = dir.path().canonicalize().unwrap().join("new_file.md");
+        assert_eq!(result, expected);
     }
 
     #[test]
-    fn is_path_safe_rejects_sibling_with_similar_prefix() {
-        let root = Path::new("/vault");
-        // "/vault-other" starts with "/vault" as a string but is not under /vault/
-        // Path::starts_with does component-level matching, not string prefix
-        assert!(!is_path_safe(root, Path::new("/vault-other/note.md")));
+    fn safe_canonicalize_nonexistent_nested_path() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("a/b/c.md");
+
+        let result = safe_canonicalize(&file).unwrap();
+        let expected = dir.path().canonicalize().unwrap().join("a/b/c.md");
+        assert_eq!(result, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_canonicalize_resolves_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("file.md"), "content").unwrap();
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let result = safe_canonicalize(&link.join("file.md")).unwrap();
+        assert_eq!(result, real_dir.canonicalize().unwrap().join("file.md"));
     }
 
     #[test]
-    fn is_path_safe_handles_root_itself() {
-        let root = Path::new("/vault");
-        assert!(is_path_safe(root, Path::new("/vault")));
-        assert!(is_path_safe(root, Path::new("/vault/")));
+    fn resolve_allows_valid_paths() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("note.md"), "content").unwrap();
+        let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
+
+        let path = VaultPath::new("note.md").unwrap();
+        assert!(storage.resolve(&path).is_ok());
+    }
+
+    #[test]
+    fn resolve_allows_nonexistent_file_in_existing_dir() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(dir.path().to_path_buf()).unwrap();
+
+        let path = VaultPath::new("new_note.md").unwrap();
+        assert!(storage.resolve(&path).is_ok());
     }
 }
