@@ -11,6 +11,8 @@ pub enum VaultPathError {
     Empty,
     #[error("vault path cannot contain '..' traversal")]
     PathTraversal,
+    #[error("only empty string represents root, '/' is not allowed")]
+    InvalidRoot,
     #[error("path is not under root")]
     NotUnderRoot,
 }
@@ -63,14 +65,19 @@ pub struct VaultPath(String);
 impl VaultPath {
     /// Creates a new VaultPath, validating the path and normalizing separators.
     ///
-    /// An empty string or "/" represents the root folder.
+    /// An empty string represents the root folder.
+    /// Bare separators like "/" or "\\" are rejected — only "" is valid root.
     pub fn new(path: impl AsRef<str>) -> Result<Self, VaultPathError> {
         let path = path.as_ref();
         let normalized = normalize_separators(path);
 
-        // Empty after normalization means root folder
+        // Empty after normalization means root folder — but only if the
+        // original input was truly empty. Bare separators like "/" are rejected.
         if normalized.is_empty() {
-            return Ok(VaultPath(String::new()));
+            if path.is_empty() {
+                return Ok(VaultPath(String::new()));
+            }
+            return Err(VaultPathError::InvalidRoot);
         }
 
         if normalized.split('/').any(|segment| segment == "..") {
@@ -366,11 +373,26 @@ mod tests {
         assert!(root.is_folder());
         assert_eq!(root.kind(), PathKind::Folder);
         assert_eq!(root.as_str(), "");
+    }
 
-        // "/" normalizes to root
-        let root_slash = VaultPath::new("/").unwrap();
-        assert!(root_slash.is_root());
-        assert_eq!(root_slash, root);
+    #[test]
+    fn rejects_bare_separator_as_root() {
+        assert_eq!(
+            VaultPath::new("/").unwrap_err(),
+            VaultPathError::InvalidRoot
+        );
+        assert_eq!(
+            VaultPath::new("\\").unwrap_err(),
+            VaultPathError::InvalidRoot
+        );
+        assert_eq!(
+            VaultPath::new("///").unwrap_err(),
+            VaultPathError::InvalidRoot
+        );
+        assert_eq!(
+            VaultPath::new("\\\\/").unwrap_err(),
+            VaultPathError::InvalidRoot
+        );
     }
 
     #[test]

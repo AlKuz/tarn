@@ -325,7 +325,13 @@ impl TarnCore {
 
         let handle = tokio::spawn(async move {
             let observer = LocalStorageObserver::new(vault_path.clone());
-            let storage = crate::storage::local::LocalStorage::new(vault_path);
+            let storage = match crate::storage::local::LocalStorage::new(vault_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "failed to initialize storage for index sync");
+                    return;
+                }
+            };
 
             let stream = match observer.observe().await {
                 Ok(s) => s,
@@ -1129,7 +1135,9 @@ mod tests {
 
     fn setup() -> (TempDir, TarnCore) {
         let dir = TempDir::new().unwrap();
-        let core = TarnBuilder::local(dir.path().to_path_buf()).build();
+        let core = TarnBuilder::local(dir.path().to_path_buf())
+            .build()
+            .unwrap();
         (dir, core)
     }
 

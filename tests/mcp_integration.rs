@@ -23,12 +23,12 @@ fn vault_path() -> PathBuf {
 }
 
 fn create_server() -> TarnMcpServer {
-    let core = TarnBuilder::local(vault_path()).build();
+    let core = TarnBuilder::local(vault_path()).build().unwrap();
     TarnMcpServer::new(Arc::new(core))
 }
 
 fn create_core() -> tarn::TarnCore {
-    TarnBuilder::local(vault_path()).build()
+    TarnBuilder::local(vault_path()).build().unwrap()
 }
 
 /// Extract JSON from resource result

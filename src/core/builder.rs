@@ -12,6 +12,8 @@ use crate::storage::local::LocalStorage;
 pub enum BuildError {
     #[error("index initialization failed: {0}")]
     Index(#[from] InMemoryIndexError),
+    #[error("storage initialization failed: {0}")]
+    Storage(#[from] std::io::Error),
 }
 
 pub struct TarnBuilder {
@@ -46,13 +48,13 @@ impl TarnBuilder {
     }
 
     /// Build TarnCore without an index.
-    pub fn build(self) -> TarnCore {
+    pub fn build(self) -> Result<TarnCore, BuildError> {
         match self.config.storage {
-            StorageConfig::Local(conf) => TarnCore {
+            StorageConfig::Local(conf) => Ok(TarnCore {
                 vault_path: conf.path.clone(),
-                storage: LocalStorage::new(conf.path),
+                storage: LocalStorage::new(conf.path)?,
                 index: None,
-            },
+            }),
         }
     }
 
@@ -69,7 +71,7 @@ impl TarnBuilder {
         match self.config.storage {
             StorageConfig::Local(conf) => Ok(TarnCore {
                 vault_path: conf.path.clone(),
-                storage: LocalStorage::new(conf.path),
+                storage: LocalStorage::new(conf.path)?,
                 index,
             }),
         }
