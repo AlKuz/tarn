@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::common::{Buildable, Configurable, VaultPath};
+use crate::common::{Configurable, VaultPath};
 use crate::note_handler::Note;
 use crate::tokenizer::{Tokenizer, TokenizerConfig};
 
@@ -87,33 +87,34 @@ pub struct InMemoryIndex {
 }
 
 impl InMemoryIndex {
-    /// Create an index from config. Loads from persistence path if exists.
-    pub async fn new(config: IndexConfig) -> Result<Self, InMemoryIndexError> {
-        let IndexConfig::InMemory {
-            ref tokenizer,
-            ref persistence_path,
-        } = config;
-
-        let tok = tokenizer.clone().build()?;
-
-        let inner = match persistence_path {
+    /// Create an index with the given tokenizer and optional persistence path.
+    ///
+    /// If a persistence path is provided and exists, the index is loaded from disk.
+    /// The tokenizer config is checked against the persisted config — if they differ,
+    /// the persisted data is discarded and a fresh index is created.
+    pub fn new(
+        tokenizer: Box<dyn Tokenizer>,
+        persistence_path: Option<PathBuf>,
+    ) -> Result<Self, InMemoryIndexError> {
+        let tokenizer_config = tokenizer.config();
+        let inner = match &persistence_path {
             Some(path) if path.exists() => {
-                let data = tokio::fs::read(path).await?;
+                let data = std::fs::read(path)?;
                 let index_data: IndexData = serde_json::from_slice(&data)?;
-                if index_data.meta.tokenizer_config == *tokenizer {
+                if index_data.meta.tokenizer_config == tokenizer_config {
                     index_data
                 } else {
                     tracing::info!("tokenizer config changed, rebuilding index");
-                    IndexData::new(tokenizer.clone())
+                    IndexData::new(tokenizer_config)
                 }
             }
-            _ => IndexData::new(tokenizer.clone()),
+            _ => IndexData::new(tokenizer_config),
         };
 
         Ok(Self {
             data: RwLock::new(inner),
-            tokenizer: tok,
-            persistence_path: persistence_path.clone(),
+            tokenizer,
+            persistence_path,
         })
     }
 
@@ -166,18 +167,18 @@ impl InMemoryIndex {
 
             // Convert links to IndexLink
             let links: Vec<IndexLink> = section.links.iter().map(IndexLink::from).collect();
+            let tokens = tokenizer.tokenize(&section.content);
 
             let entry = SectionEntry {
                 note_path: note_path.clone(),
                 heading_path: section.heading_path.clone(),
                 tags: all_tags.clone(),
                 links,
-                word_count: section.word_count(),
+                token_count: tokens.len(),
                 revision: crate::common::RevisionToken::from(chrono::Utc::now().to_rfc3339()),
             };
 
             // Add to BM25 index
-            let tokens = tokenizer.tokenize(&section.content);
             inner.bm25_index.add_document(section_path.clone(), &tokens);
 
             // Add to tag index
@@ -485,6 +486,16 @@ impl From<&crate::note_handler::Link> for IndexLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Buildable;
+
+    fn make_index() -> InMemoryIndex {
+        IndexConfig::InMemory {
+            tokenizer: TokenizerConfig::default(),
+            persistence_path: None,
+        }
+        .build()
+        .unwrap()
+    }
 
     fn make_note(path: &str, content: &str) -> Note {
         let mut note = Note::from(content);
@@ -515,12 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn index_and_search() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note1 = make_note(
             "rust-guide.md",
@@ -550,12 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_sections_for_note() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note(
             "note.md",
@@ -572,12 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_note() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note("note.md", "# Test\n\nContent.\n");
         index.update(&note).await.unwrap();
@@ -594,12 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_index() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note("note.md", "Content.\n");
         index.update(&note).await.unwrap();
@@ -613,12 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_with_folder_filter() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note1 = make_note(
             "projects/alpha/design.md",
@@ -654,12 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn backlinks() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note1 = make_note("note1.md", "Check [[note2]] for details.\n");
         let note2 = make_note("note2.md", "Reference content.\n");
@@ -675,12 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_links() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note("note.md", "See [[target1]] and [[target2|alias]].\n");
         index.update(&note).await.unwrap();
@@ -702,14 +678,14 @@ mod tests {
         };
 
         // Create index, add data, persist
-        let index = InMemoryIndex::new(make_config()).await.unwrap();
+        let index = make_config().build().unwrap();
         let note = make_note("note.md", "# Test\n\nRust programming.\n");
         index.update(&note).await.unwrap();
         assert_eq!(index.count().await.unwrap(), 1);
         drop(index);
 
         // Reload with same config — data should be preserved
-        let index = InMemoryIndex::new(make_config()).await.unwrap();
+        let index = make_config().build().unwrap();
         assert_eq!(index.count().await.unwrap(), 1);
     }
 
@@ -723,29 +699,27 @@ mod tests {
             tokenizer: TokenizerConfig::default(),
             persistence_path: Some(index_path.clone()),
         };
-        let index = InMemoryIndex::new(config).await.unwrap();
+        let index = config.build().unwrap();
         let note = make_note("note.md", "# Test\n\nRust programming.\n");
         index.update(&note).await.unwrap();
         assert_eq!(index.count().await.unwrap(), 1);
         drop(index);
 
         // Tamper the persisted meta to simulate a different tokenizer config
-        let data = tokio::fs::read(&index_path).await.unwrap();
+        let data = std::fs::read(&index_path).unwrap();
         let mut snapshot: serde_json::Value = serde_json::from_slice(&data).unwrap();
         snapshot["meta"]["tokenizer_config"] = serde_json::json!({
             "type": "hugging_face",
             "model_id": "bert-base-uncased"
         });
-        tokio::fs::write(&index_path, serde_json::to_vec(&snapshot).unwrap())
-            .await
-            .unwrap();
+        std::fs::write(&index_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
 
         // Reload with Naive — snapshot has HuggingFace, so mismatch → fresh index
         let config = IndexConfig::InMemory {
             tokenizer: TokenizerConfig::default(),
             persistence_path: Some(index_path.clone()),
         };
-        let index = InMemoryIndex::new(config).await.unwrap();
+        let index = config.build().unwrap();
         assert_eq!(index.count().await.unwrap(), 0);
     }
 }

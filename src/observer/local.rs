@@ -7,7 +7,8 @@ use tokio::fs;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::{Configurable, RevisionToken, VaultPath};
+use crate::observer::config::ObserverConfig;
 use crate::observer::{Observer, ObserverError, StorageEvent};
 
 pub struct LocalStorageObserver {
@@ -17,6 +18,16 @@ pub struct LocalStorageObserver {
 impl LocalStorageObserver {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+}
+
+impl Configurable for LocalStorageObserver {
+    type Config = ObserverConfig;
+
+    fn config(&self) -> Self::Config {
+        ObserverConfig::Local {
+            path: self.path.clone(),
+        }
     }
 }
 

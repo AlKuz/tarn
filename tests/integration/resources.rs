@@ -181,7 +181,7 @@ async fn note_resource_reads_content() {
     let note = read_resource(&client, "tarn://note/wiki/Rust.md").await;
 
     assert_eq!(note["title"], "Rust");
-    assert!(note["word_count"].as_u64().unwrap() > 0);
+    assert!(note["token_count"].as_u64().unwrap() > 0);
     assert!(!note["content"].as_str().unwrap().is_empty());
     assert!(!note["revision"].as_str().unwrap().is_empty());
 }

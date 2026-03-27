@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 
 use super::TarnMcpServer;
 use crate::common::{RevisionToken, VaultPath};
-use crate::core::tarn_core::ReplaceMode;
+use crate::core::responses::ReplaceMode;
 
 fn parse_folder(folder: Option<String>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
     folder
@@ -16,22 +16,6 @@ fn parse_folder(folder: Option<String>) -> Result<Option<VaultPath>, rmcp::Error
 }
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct ReadNoteParams {
-    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
-    pub path: String,
-    #[schemars(description = "Return only these section headings (fragment retrieval)")]
-    pub sections: Option<Vec<String>>,
-    #[schemars(description = "Include parsed frontmatter (default: true)")]
-    pub include_frontmatter: Option<bool>,
-    #[schemars(description = "Include extracted links (default: false)")]
-    pub include_links: Option<bool>,
-    #[schemars(
-        description = "Return heading outline + word counts instead of full content (default: false)"
-    )]
-    pub summary: Option<bool>,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct SearchNotesParams {
     #[schemars(description = "Search query (case-insensitive text match)")]
     pub query: String,
@@ -40,22 +24,6 @@ pub struct SearchNotesParams {
     #[schemars(description = "Notes must have all these tags")]
     pub tag_filter: Option<Vec<String>>,
     #[schemars(description = "Max results (default: 20)")]
-    pub limit: Option<usize>,
-    #[schemars(description = "Pagination offset")]
-    pub offset: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct ListNotesParams {
-    #[schemars(description = "Folder path (default: root)")]
-    pub folder: Option<String>,
-    #[schemars(description = "Include subfolders (default: false)")]
-    pub recursive: Option<bool>,
-    #[schemars(description = "Filter by tags")]
-    pub tag_filter: Option<Vec<String>>,
-    #[schemars(description = "Sort order: \"title\" (default)")]
-    pub sort: Option<String>,
-    #[schemars(description = "Max results (default: 50)")]
     pub limit: Option<usize>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<usize>,
@@ -104,38 +72,6 @@ pub struct ReplaceInNoteParams {
 #[tool_router(vis = "pub(crate)")]
 impl TarnMcpServer {
     #[tool(
-        description = "Read note content with control over detail level. Supports fragment retrieval by section headings and summary mode (heading outline + word counts)."
-    )]
-    async fn tarn_read_note(
-        &self,
-        Parameters(params): Parameters<ReadNoteParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let result = self
-            .core
-            .read_note(
-                &params.path,
-                params.sections.as_deref(),
-                params.include_frontmatter.unwrap_or(true),
-                params.include_links.unwrap_or(false),
-                params.summary.unwrap_or(false),
-            )
-            .await;
-
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
-        }
-    }
-
-    #[tool(
         description = "Search across the vault using case-insensitive text matching. Returns matching notes with snippets showing context around matches."
     )]
     async fn tarn_search_notes(
@@ -150,40 +86,6 @@ impl TarnMcpServer {
                 folder.as_ref(),
                 params.tag_filter.as_deref(),
                 params.limit.unwrap_or(20),
-                params.offset.unwrap_or(0),
-            )
-            .await;
-
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
-        }
-    }
-
-    #[tool(
-        description = "List notes in a folder with optional filtering by tags. Supports pagination and sorting."
-    )]
-    async fn tarn_list_notes(
-        &self,
-        Parameters(params): Parameters<ListNotesParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let folder = parse_folder(params.folder)?;
-        let result = self
-            .core
-            .list_notes(
-                folder.as_ref(),
-                params.recursive.unwrap_or(false),
-                params.tag_filter.as_deref(),
-                params.sort.as_deref(),
-                params.limit.unwrap_or(50),
                 params.offset.unwrap_or(0),
             )
             .await;

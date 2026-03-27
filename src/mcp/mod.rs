@@ -5,11 +5,9 @@
 //!
 //! ## Tools
 //!
-//! Interactive operations for searching, listing, and reading notes:
+//! Discover and modify notes:
 //!
-//! - `tarn_read_note` - Read note content with fragment retrieval and summary modes
 //! - `tarn_search_notes` - Full-text search with BM25 ranking (if index configured)
-//! - `tarn_list_notes` - List notes with folder/tag filtering and pagination
 //! - `tarn_get_tags` - Get tag hierarchy with usage statistics
 //! - `tarn_create_note` - Create a new note (fails if already exists)
 //! - `tarn_update_note` - Update an existing note with revision-based conflict detection
@@ -37,13 +35,10 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use tarn::{TarnBuilder, TarnMcpServer};
+//! use tarn::{TarnConfig, TarnMcpServer};
+//! use tarn::common::Buildable;
 //!
-//! let core = TarnBuilder::new("/path/to/vault")
-//!     .with_in_memory_index()
-//!     .await?
-//!     .build()
-//!     .await?;
+//! let core = TarnConfig::local("/path/to/vault".into()).build()?;
 //!
 //! let server = TarnMcpServer::new(Arc::new(core));
 //! // Use with rmcp transport (stdio, HTTP, etc.)
@@ -60,7 +55,7 @@ use rmcp::{
     service::RequestContext, tool_handler,
 };
 
-use crate::core::builder::TarnCore;
+use crate::core::tarn_core::TarnCore;
 
 /// MCP server exposing Tarn vault operations.
 ///

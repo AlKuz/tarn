@@ -2,100 +2,6 @@ use crate::common::*;
 use serde_json::{Value, json};
 
 // =============================================================================
-// tarn_read_note
-// =============================================================================
-
-#[tokio::test]
-async fn read_note_full() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/Rust.md", "include_frontmatter": true}),
-    )
-    .await;
-
-    assert_eq!(note["title"], "Rust");
-    assert!(!note["revision"].as_str().unwrap().is_empty());
-    assert!(!note["content"].as_str().unwrap().is_empty());
-    assert!(
-        note["frontmatter"]["tags"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("programming/rust".to_string()))
-    );
-}
-
-#[tokio::test]
-async fn read_note_with_links() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/Rust.md", "include_links": true}),
-    )
-    .await;
-
-    let links = note["links"].as_array().unwrap();
-    let wiki_links: Vec<_> = links.iter().filter(|l| l["type"] == "wiki").collect();
-    assert!(!wiki_links.is_empty());
-}
-
-#[tokio::test]
-async fn read_note_specific_sections() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/Rust.md", "sections": ["Ownership"]}),
-    )
-    .await;
-
-    let content = note["content"].as_str().unwrap();
-    assert!(content.contains("Ownership"));
-    assert!(!content.contains("# Lifetimes"));
-}
-
-#[tokio::test]
-async fn read_note_summary_mode() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/Rust.md", "summary": true}),
-    )
-    .await;
-
-    assert!(note["content"].is_null() || note.get("content").is_none());
-    let sections = note["sections"].as_array().unwrap();
-    let headings: Vec<&str> = sections
-        .iter()
-        .map(|s| s["heading"].as_str().unwrap())
-        .collect();
-    assert!(headings.contains(&"Rust"));
-    assert!(headings.contains(&"Ownership"));
-    assert!(headings.contains(&"Lifetimes"));
-}
-
-#[tokio::test]
-async fn read_note_nested_project() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "projects/webapp/development/API Design.md"}),
-    )
-    .await;
-
-    assert_eq!(note["title"], "API Design");
-}
-
-// =============================================================================
 // tarn_search_notes
 // =============================================================================
 
@@ -231,157 +137,6 @@ async fn search_in_nested_folder() {
 }
 
 // =============================================================================
-// tarn_list_notes
-// =============================================================================
-
-#[tokio::test]
-async fn list_notes_recursive() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"recursive": true, "limit": 100}),
-    )
-    .await;
-
-    assert!(list["total"].as_u64().unwrap() >= 7);
-}
-
-#[tokio::test]
-async fn list_notes_non_recursive() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"recursive": false, "limit": 100}),
-    )
-    .await;
-
-    for note in list["notes"].as_array().unwrap() {
-        assert!(
-            !note["path"].as_str().unwrap().contains('/'),
-            "path {} should be in root",
-            note["path"]
-        );
-    }
-}
-
-#[tokio::test]
-async fn list_notes_in_folder() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"folder": "daily", "recursive": true}),
-    )
-    .await;
-
-    assert_eq!(list["total"].as_u64().unwrap(), 2);
-}
-
-#[tokio::test]
-async fn list_notes_sorted_by_title() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"recursive": true, "sort": "title", "limit": 100}),
-    )
-    .await;
-
-    let titles: Vec<&str> = list["notes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|n| n["title"].as_str().unwrap_or(""))
-        .collect();
-    let mut sorted = titles.clone();
-    sorted.sort();
-    assert_eq!(titles, sorted);
-}
-
-#[tokio::test]
-async fn list_notes_tag_filter() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"recursive": true, "tag_filter": ["project", "active"], "limit": 50}),
-    )
-    .await;
-
-    for note in list["notes"].as_array().unwrap() {
-        let tags = note["tags"].as_array().unwrap();
-        assert!(tags.contains(&Value::String("project".to_string())));
-        assert!(tags.contains(&Value::String("active".to_string())));
-    }
-}
-
-#[tokio::test]
-async fn list_notes_includes_word_count() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"folder": "wiki", "recursive": true}),
-    )
-    .await;
-
-    for note in list["notes"].as_array().unwrap() {
-        assert!(note["word_count"].as_u64().unwrap() > 0);
-    }
-}
-
-#[tokio::test]
-async fn list_notes_nested_folder_recursive() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"folder": "projects/webapp", "recursive": true, "limit": 100}),
-    )
-    .await;
-
-    assert_eq!(list["total"].as_u64().unwrap(), 5);
-    let paths: Vec<&str> = list["notes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|n| n["path"].as_str().unwrap())
-        .collect();
-    assert!(paths.iter().any(|p| p.contains("design")));
-    assert!(paths.iter().any(|p| p.contains("development")));
-    assert!(paths.iter().any(|p| p.contains("docs")));
-}
-
-#[tokio::test]
-async fn list_notes_nested_folder_non_recursive() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"folder": "projects/webapp/design", "recursive": false, "limit": 100}),
-    )
-    .await;
-
-    assert_eq!(list["total"].as_u64().unwrap(), 2);
-    for note in list["notes"].as_array().unwrap() {
-        let path = note["path"].as_str().unwrap();
-        assert!(path.starts_with("projects/webapp/design/"));
-        let remaining = path.strip_prefix("projects/webapp/design/").unwrap();
-        assert!(!remaining.contains('/'));
-    }
-}
-
-// =============================================================================
 // tarn_get_tags
 // =============================================================================
 
@@ -477,13 +232,8 @@ async fn create_note_success() {
     assert_eq!(result["path"], "test/new-note.md");
     assert!(!result["revision"].as_str().unwrap().is_empty());
 
-    // Read it back
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "test/new-note.md"}),
-    )
-    .await;
+    // Read it back via resource
+    let note = read_resource(&client, "tarn://note/test/new-note.md").await;
     assert_eq!(note["title"], "Test");
     assert!(note["content"].as_str().unwrap().contains("Hello world"));
 }
@@ -510,8 +260,8 @@ async fn create_note_existing_fails() {
 async fn update_note_with_valid_revision() {
     let (_tmp, client) = spawn_server(false).await;
 
-    // Read to get revision
-    let note = call_tool(&client, "tarn_read_note", json!({"path": "wiki/Rust.md"})).await;
+    // Read to get revision via resource
+    let note = read_resource(&client, "tarn://note/wiki/Rust.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     // Update
@@ -557,7 +307,7 @@ async fn update_note_wrong_revision_fails() {
 async fn replace_in_note_first_mode() {
     let (_tmp, client) = spawn_server(false).await;
 
-    let note = call_tool(&client, "tarn_read_note", json!({"path": "wiki/Rust.md"})).await;
+    let note = read_resource(&client, "tarn://note/wiki/Rust.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     let result = call_tool(
@@ -575,8 +325,8 @@ async fn replace_in_note_first_mode() {
 
     assert_eq!(result["path"], "wiki/Rust.md");
 
-    // Verify the replacement
-    let updated = call_tool(&client, "tarn_read_note", json!({"path": "wiki/Rust.md"})).await;
+    // Verify the replacement via resource
+    let updated = read_resource(&client, "tarn://note/wiki/Rust.md").await;
     let content = updated["content"].as_str().unwrap();
     assert!(content.contains("Rust (edited)"));
 }
@@ -593,12 +343,7 @@ async fn replace_in_note_all_mode() {
     )
     .await;
 
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "test/replace-all.md"}),
-    )
-    .await;
+    let note = read_resource(&client, "tarn://note/test/replace-all.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     call_tool(
@@ -614,12 +359,7 @@ async fn replace_in_note_all_mode() {
     )
     .await;
 
-    let updated = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "test/replace-all.md"}),
-    )
-    .await;
+    let updated = read_resource(&client, "tarn://note/test/replace-all.md").await;
     let content = updated["content"].as_str().unwrap();
     assert!(!content.contains("foo"));
     assert!(content.contains("qux"));
@@ -636,12 +376,7 @@ async fn replace_in_note_regex_mode() {
     )
     .await;
 
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "test/replace-regex.md"}),
-    )
-    .await;
+    let note = read_resource(&client, "tarn://note/test/replace-regex.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     call_tool(
@@ -657,12 +392,7 @@ async fn replace_in_note_regex_mode() {
     )
     .await;
 
-    let updated = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "test/replace-regex.md"}),
-    )
-    .await;
+    let updated = read_resource(&client, "tarn://note/test/replace-regex.md").await;
     let content = updated["content"].as_str().unwrap();
     assert!(content.contains("2024/01/15"));
     assert!(content.contains("2024/01/16"));
@@ -679,14 +409,12 @@ async fn lists_all_tools() {
     let tools = client.list_all_tools().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
 
-    assert!(names.contains(&"tarn_read_note"));
     assert!(names.contains(&"tarn_search_notes"));
-    assert!(names.contains(&"tarn_list_notes"));
     assert!(names.contains(&"tarn_get_tags"));
     assert!(names.contains(&"tarn_create_note"));
     assert!(names.contains(&"tarn_update_note"));
     assert!(names.contains(&"tarn_replace_in_note"));
-    assert_eq!(names.len(), 7);
+    assert_eq!(names.len(), 5);
 }
 
 // =============================================================================
@@ -715,18 +443,4 @@ async fn search_with_index() {
         paths.iter().any(|p| p.contains("Rust")),
         "expected Rust note in results, got {paths:?}"
     );
-}
-
-#[tokio::test]
-async fn list_notes_with_index() {
-    let (_tmp, client) = spawn_server(true).await;
-
-    let list = call_tool(
-        &client,
-        "tarn_list_notes",
-        json!({"recursive": true, "limit": 100}),
-    )
-    .await;
-
-    assert!(list["total"].as_u64().unwrap() >= 7);
 }

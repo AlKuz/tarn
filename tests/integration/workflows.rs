@@ -1,7 +1,7 @@
 use crate::common::*;
 use serde_json::{Value, json};
 
-/// Simulates an agent searching for a topic, reading notes, and following links.
+/// Simulates an agent searching for a topic, reading notes via resources, and following links.
 #[tokio::test]
 async fn search_read_follow_links() {
     let (_tmp, client) = spawn_server(false).await;
@@ -22,37 +22,21 @@ async fn search_read_follow_links() {
         .collect();
     assert!(paths.contains(&"wiki/Rust.md"));
 
-    // Step 3: Read the Rust note with links
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/Rust.md", "include_frontmatter": true, "include_links": true}),
-    )
-    .await;
+    // Step 3: Read the Rust note via resource
+    let note = read_resource(&client, "tarn://note/wiki/Rust.md").await;
     assert_eq!(note["title"], "Rust");
     assert!(
-        note["frontmatter"]["tags"]
+        note["tags"]
             .as_array()
             .unwrap()
             .contains(&Value::String("programming/rust".to_string()))
     );
 
-    // Step 4: Follow a link to WebApp
-    let links = note["links"].as_array().unwrap();
-    let webapp_link = links
-        .iter()
-        .find(|l| l["target"].as_str().unwrap().contains("WebApp"));
-    assert!(webapp_link.is_some());
-
-    let webapp = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "projects/WebApp.md", "include_frontmatter": true}),
-    )
-    .await;
+    // Step 4: Read a linked note (WebApp) via resource
+    let webapp = read_resource(&client, "tarn://note/projects/WebApp.md").await;
     assert_eq!(webapp["title"], "WebApp");
     assert!(
-        webapp["frontmatter"]["tags"]
+        webapp["tags"]
             .as_array()
             .unwrap()
             .contains(&Value::String("project".to_string()))
@@ -72,25 +56,20 @@ async fn project_exploration_workflow() {
     let tags = read_resource(&client, "tarn://vault/tags/projects").await;
     assert!(!tags["tags"].as_array().unwrap().is_empty());
 
-    // Step 3: List all project notes
-    let list = call_tool(
+    // Step 3: Search all project notes (empty query = list)
+    let search = call_tool(
         &client,
-        "tarn_list_notes",
-        json!({"folder": "projects", "recursive": true, "limit": 50}),
+        "tarn_search_notes",
+        json!({"query": "", "folder": "projects", "limit": 50}),
     )
     .await;
-    assert!(list["total"].as_u64().unwrap() >= 1);
+    assert!(search["total"].as_u64().unwrap() >= 1);
 
-    // Step 4: Read each note's summary
-    for note_entry in list["notes"].as_array().unwrap() {
-        let path = note_entry["path"].as_str().unwrap();
-        let note = call_tool(
-            &client,
-            "tarn_read_note",
-            json!({"path": path, "summary": true}),
-        )
-        .await;
-        assert!(note["sections"].as_array().is_some());
+    // Step 4: Read each note via resource
+    for result in search["results"].as_array().unwrap() {
+        let path = result["path"].as_str().unwrap();
+        let note = read_resource(&client, &format!("tarn://note/{path}")).await;
+        assert!(note["content"].as_str().is_some());
     }
 }
 
@@ -111,16 +90,11 @@ async fn write_workflow() {
     .await;
     let revision = created["revision"].as_str().unwrap().to_string();
 
-    // Step 2: Read it back
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "projects/new-feature.md", "include_frontmatter": true, "include_links": false}),
-    )
-    .await;
+    // Step 2: Read it back via resource
+    let note = read_resource(&client, "tarn://note/projects/new-feature.md").await;
     assert_eq!(note["title"], "New Feature");
     assert!(
-        note["frontmatter"]["tags"]
+        note["tags"]
             .as_array()
             .unwrap()
             .contains(&Value::String("project".to_string()))
@@ -140,13 +114,8 @@ async fn write_workflow() {
     let new_revision = updated["revision"].as_str().unwrap();
     assert_ne!(new_revision, revision);
 
-    // Step 4: Verify via read
-    let final_note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "projects/new-feature.md"}),
-    )
-    .await;
+    // Step 4: Verify via resource
+    let final_note = read_resource(&client, "tarn://note/projects/new-feature.md").await;
     assert!(
         final_note["content"]
             .as_str()
@@ -154,14 +123,14 @@ async fn write_workflow() {
             .contains("Completed")
     );
 
-    // Step 5: The new note should appear in project listing
-    let list = call_tool(
+    // Step 5: The new note should appear in project search
+    let search = call_tool(
         &client,
-        "tarn_list_notes",
-        json!({"folder": "projects", "recursive": true, "tag_filter": ["project", "active"]}),
+        "tarn_search_notes",
+        json!({"query": "", "folder": "projects", "tag_filter": ["project", "active"]}),
     )
     .await;
-    let paths: Vec<&str> = list["notes"]
+    let paths: Vec<&str> = search["results"]
         .as_array()
         .unwrap()
         .iter()
@@ -183,33 +152,15 @@ async fn full_research_session() {
     let search = call_tool(&client, "tarn_search_notes", json!({"query": "API"})).await;
     assert!(search["total"].as_u64().unwrap() > 0);
 
-    // Step 3: Read REST API note
-    let note = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/REST API.md", "include_links": true}),
-    )
-    .await;
+    // Step 3: Read REST API note via resource
+    let note = read_resource(&client, "tarn://note/wiki/REST API.md").await;
     assert_eq!(note["title"], "REST API");
 
-    // Step 4: Find HTTP link
-    let links = note["links"].as_array().unwrap();
-    let http_link = links
-        .iter()
-        .find(|l| l["target"].as_str().unwrap().contains("HTTP"));
-    assert!(http_link.is_some());
-
-    // Step 5: Read HTTP note summary
-    let http = call_tool(
-        &client,
-        "tarn_read_note",
-        json!({"path": "wiki/HTTP.md", "summary": true}),
-    )
-    .await;
+    // Step 4: Read HTTP note via resource
+    let http = read_resource(&client, "tarn://note/wiki/HTTP.md").await;
     assert_eq!(http["title"], "HTTP");
-    assert!(http["content"].is_null() || http.get("content").is_none());
 
-    // Step 6: Explore programming/web tag
+    // Step 5: Explore programming/web tag
     let tags = call_tool(
         &client,
         "tarn_get_tags",

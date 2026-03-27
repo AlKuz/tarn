@@ -10,7 +10,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio::task::JoinHandle;
 
-use tarn::TarnBuilder;
+use tarn::TarnConfig;
+use tarn::common::Buildable;
 use tarn::index::IndexConfig;
 use tarn::mcp::TarnMcpServer;
 
@@ -116,19 +117,19 @@ async fn main() -> anyhow::Result<()> {
     let use_index = cli.index || cli.index_path.is_some();
 
     let (core, _index_sync_handle): (Arc<_>, Option<JoinHandle<()>>) = if use_index {
-        let mut builder = if let Some(vault) = cli.vault {
-            TarnBuilder::local(vault)
-        } else {
-            TarnBuilder::from_env()?
-        };
-
         let index_config = IndexConfig::InMemory {
             tokenizer: Default::default(),
             persistence_path: cli.index_path,
         };
-        builder = builder.with_index(index_config);
 
-        let core = Arc::new(builder.build_async().await?);
+        let config = if let Some(vault) = cli.vault {
+            TarnConfig::local(vault)
+        } else {
+            TarnConfig::from_env()?
+        }
+        .with_index(index_config);
+
+        let core = Arc::new(config.build()?);
 
         tracing::info!("rebuilding index...");
         core.rebuild_index().await?;
@@ -139,11 +140,12 @@ async fn main() -> anyhow::Result<()> {
 
         (core, Some(handle))
     } else {
-        let core = if let Some(vault) = cli.vault {
-            Arc::new(TarnBuilder::local(vault).build()?)
+        let config = if let Some(vault) = cli.vault {
+            TarnConfig::local(vault)
         } else {
-            Arc::new(TarnBuilder::from_env()?.build()?)
+            TarnConfig::from_env()?
         };
+        let core = Arc::new(config.build()?);
         (core, None)
     };
 

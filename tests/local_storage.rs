@@ -980,7 +980,8 @@ mod mime_types {
 
 mod crlf_support {
     use super::*;
-    use tarn::TarnBuilder;
+    use tarn::TarnConfig;
+    use tarn::common::Buildable;
     use tarn::note_handler::Note;
 
     #[tokio::test]
@@ -1028,9 +1029,7 @@ mod crlf_support {
         .await
         .unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf())
-            .build()
-            .unwrap();
+        let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
 
         // Test vault_tags returns correctly parsed tags
         let tags_response = core.vault_tags(None).await.unwrap();
@@ -1051,9 +1050,7 @@ mod crlf_support {
         .await
         .unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf())
-            .build()
-            .unwrap();
+        let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
 
         let results = core
             .search_notes("unique_term_123", None, None, 10, 0)

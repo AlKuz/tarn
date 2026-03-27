@@ -1,5 +1,7 @@
+pub mod config;
 pub mod local;
 
+pub use config::ObserverConfig;
 pub use local::LocalStorageObserver;
 
 use crate::common::{RevisionToken, VaultPath};

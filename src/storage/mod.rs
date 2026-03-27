@@ -16,8 +16,10 @@
 //! fail with [`StorageError::Conflict`] if the file was modified since the token
 //! was issued.
 
+pub mod config;
 pub mod local;
 
+pub use config::{LocalStorageConfig, StorageConfig};
 pub use local::LocalStorage;
 
 use crate::common::{DataURI, RevisionToken, VaultPath};

@@ -6,7 +6,8 @@ use async_stream::stream;
 use futures_core::stream::Stream;
 use tokio::fs;
 
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::{Configurable, RevisionToken, VaultPath};
+use crate::storage::config::{LocalStorageConfig, StorageConfig};
 use crate::storage::{File, FileContent, FileMeta, Storage, StorageError};
 
 fn map_io_error(path: &VaultPath, err: std::io::Error) -> StorageError {
@@ -89,6 +90,16 @@ pub struct LocalStorage {
     canonical_root: PathBuf,
     denied_paths: RwLock<HashSet<VaultPath>>,
     read_only_paths: RwLock<HashSet<VaultPath>>,
+}
+
+impl Configurable for LocalStorage {
+    type Config = StorageConfig;
+
+    fn config(&self) -> Self::Config {
+        StorageConfig::Local(LocalStorageConfig {
+            path: self.path.clone(),
+        })
+    }
 }
 
 impl LocalStorage {

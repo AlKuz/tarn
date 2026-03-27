@@ -1,9 +1,10 @@
-pub(crate) mod builder;
 pub(crate) mod config;
+pub mod responses;
 pub mod tarn_core;
 
-// Re-export builder types
-pub use builder::BuildError;
+// Re-export config types
+pub use config::{BuildError, ConfigError, TarnConfig};
+pub use tarn_core::TarnCore;
 
 // Re-export for backward compatibility within crate
 pub use crate::common;

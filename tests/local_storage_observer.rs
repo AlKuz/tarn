@@ -259,7 +259,8 @@ mod events {
 
 mod index_sync {
     use super::*;
-    use tarn::TarnBuilder;
+    use tarn::TarnConfig;
+    use tarn::common::Buildable;
 
     const WATCHER_SETTLE_MS: u64 = 100;
     const SYNC_WAIT_MS: u64 = 500;
@@ -268,13 +269,12 @@ mod index_sync {
     async fn sync_indexes_new_file() {
         let dir = TempDir::new().unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf())
+        let core = TarnConfig::local(dir.path().to_path_buf())
             .with_index(tarn::index::IndexConfig::InMemory {
                 tokenizer: Default::default(),
                 persistence_path: None,
             })
-            .build_async()
-            .await
+            .build()
             .unwrap();
 
         let _handle = core.start_index_sync().unwrap();
@@ -314,13 +314,12 @@ mod index_sync {
         .await
         .unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf())
+        let core = TarnConfig::local(dir.path().to_path_buf())
             .with_index(tarn::index::IndexConfig::InMemory {
                 tokenizer: Default::default(),
                 persistence_path: None,
             })
-            .build_async()
-            .await
+            .build()
             .unwrap();
 
         core.rebuild_index().await.unwrap();
@@ -371,13 +370,12 @@ mod index_sync {
         .await
         .unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf())
+        let core = TarnConfig::local(dir.path().to_path_buf())
             .with_index(tarn::index::IndexConfig::InMemory {
                 tokenizer: Default::default(),
                 persistence_path: None,
             })
-            .build_async()
-            .await
+            .build()
             .unwrap();
 
         core.rebuild_index().await.unwrap();
@@ -411,13 +409,12 @@ mod index_sync {
     async fn sync_ignores_non_markdown_files() {
         let dir = TempDir::new().unwrap();
 
-        let core = TarnBuilder::local(dir.path().to_path_buf())
+        let core = TarnConfig::local(dir.path().to_path_buf())
             .with_index(tarn::index::IndexConfig::InMemory {
                 tokenizer: Default::default(),
                 persistence_path: None,
             })
-            .build_async()
-            .await
+            .build()
             .unwrap();
 
         let _handle = core.start_index_sync().unwrap();

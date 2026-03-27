@@ -1,16 +1,15 @@
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
-use crate::common::{RevisionToken, VaultPath};
-use crate::core::builder::TarnCore;
+use crate::common::{Configurable, RevisionToken, VaultPath};
+use crate::core::config::TarnConfig;
+use crate::core::responses::*;
 use crate::index::{InMemoryIndex, Index, IndexError, SearchParams, SectionEntry};
-use crate::note_handler::{Frontmatter, Link, Note};
+use crate::note_handler::Note;
 use crate::observer::{LocalStorageObserver, Observer, ObserverError, StorageEvent};
 use crate::storage::{FileContent, Storage, StorageError};
 
@@ -32,139 +31,21 @@ pub enum CoreError {
     InvalidRegex(#[from] regex::Error),
 }
 
-// --- Response types ---
-
-#[derive(Debug, Serialize)]
-pub struct SectionSummary {
-    pub heading: String,
-    pub level: u8,
-    pub word_count: usize,
+pub struct TarnCore {
+    pub(crate) storage: crate::storage::local::LocalStorage,
+    pub(crate) vault_path: std::path::PathBuf,
+    pub(crate) index: Option<std::sync::Arc<InMemoryIndex>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct LinkInfo {
-    #[serde(rename = "type")]
-    pub link_type: String,
-    pub target: String,
-    pub display: String,
-}
+impl Configurable for TarnCore {
+    type Config = TarnConfig;
 
-#[derive(Debug, Serialize)]
-pub struct ReadNoteResponse {
-    pub path: String,
-    pub title: Option<String>,
-    pub revision: RevisionToken,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frontmatter: Option<Frontmatter>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sections: Option<Vec<SectionSummary>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub links: Option<Vec<LinkInfo>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchResult {
-    pub path: String,
-    pub title: Option<String>,
-    pub snippet: String,
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchResponse {
-    pub results: Vec<SearchResult>,
-    pub total: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct NoteListEntry {
-    pub path: String,
-    pub title: Option<String>,
-    pub tags: Vec<String>,
-    pub word_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ListNotesResponse {
-    pub notes: Vec<NoteListEntry>,
-    pub total: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TagInfo {
-    pub tag: String,
-    pub count: usize,
-    pub children: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notes: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GetTagsResponse {
-    pub tags: Vec<TagInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VaultInfo {
-    pub name: String,
-    pub root_path: PathBuf,
-    pub folder: Option<VaultPath>,
-    pub note_count: usize,
-    pub tag_count: usize,
-    pub storage_type: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VaultTagInfo {
-    pub tag: String,
-    pub count: usize,
-    pub children: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VaultTagsResponse {
-    pub folder: Option<VaultPath>,
-    pub tags: Vec<VaultTagInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FolderInfo {
-    pub path: VaultPath,
-    pub note_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VaultFoldersResponse {
-    pub folder: Option<VaultPath>,
-    pub folders: Vec<FolderInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReplaceMode {
-    First,
-    All,
-    Regex,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WriteNoteResponse {
-    pub path: String,
-    pub revision: RevisionToken,
-}
-
-#[derive(Debug, Serialize)]
-pub struct NoteResourceResponse {
-    pub path: String,
-    pub title: Option<String>,
-    pub revision: RevisionToken,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frontmatter: Option<Frontmatter>,
-    pub content: String,
-    pub word_count: usize,
-    pub tags: Vec<String>,
+    fn config(&self) -> Self::Config {
+        TarnConfig {
+            storage: self.storage.config(),
+            index: self.index.as_ref().map(|idx| idx.config()),
+        }
+    }
 }
 
 // --- Helper functions ---
@@ -180,31 +61,6 @@ fn in_folder_non_recursive(path: &VaultPath, folder: Option<&VaultPath>) -> bool
     match folder {
         None => path.parent().is_none(),
         Some(f) => path.is_in_folder(f),
-    }
-}
-
-fn link_to_info(link: &Link) -> LinkInfo {
-    match link {
-        Link::Wiki(w) => LinkInfo {
-            link_type: "wiki".into(),
-            target: w.target.clone(),
-            display: link.to_string(),
-        },
-        Link::Markdown(m) => LinkInfo {
-            link_type: "markdown".into(),
-            target: m.url.clone(),
-            display: link.to_string(),
-        },
-        Link::Url(u) => LinkInfo {
-            link_type: "url".into(),
-            target: u.url.clone(),
-            display: link.to_string(),
-        },
-        Link::Email(e) => LinkInfo {
-            link_type: "email".into(),
-            target: e.address.clone(),
-            display: link.to_string(),
-        },
     }
 }
 
@@ -226,7 +82,7 @@ fn find_direct_children(parent: &str, all_tags: &[String]) -> Vec<String> {
 struct NoteAggregate {
     title: Option<String>,
     tags: HashSet<String>,
-    word_count: usize,
+    token_count: usize,
 }
 
 fn extract_snippet(content: &str, query: &str, context_chars: usize) -> String {
@@ -401,7 +257,7 @@ impl TarnCore {
             }
 
             entry.tags.extend(section.tags.iter().cloned());
-            entry.word_count += section.word_count;
+            entry.token_count += section.token_count;
         }
 
         aggregates
@@ -486,7 +342,7 @@ impl TarnCore {
                 path: path.to_string(),
                 title: agg.title,
                 tags: agg.tags.into_iter().collect(),
-                word_count: agg.word_count,
+                token_count: agg.token_count,
             })
             .collect();
 
@@ -721,79 +577,6 @@ impl TarnCore {
         })
     }
 
-    pub async fn read_note(
-        &self,
-        path: &str,
-        sections: Option<&[String]>,
-        include_frontmatter: bool,
-        include_links: bool,
-        summary: bool,
-    ) -> Result<ReadNoteResponse, CoreError> {
-        let file_path: VaultPath = path.try_into().map_err(StorageError::from)?;
-        let (note, revision) = self.read_and_parse(&file_path).await?;
-
-        let section_summaries: Vec<SectionSummary> = note
-            .sections
-            .iter()
-            .filter_map(|s| {
-                s.heading.as_ref().map(|h| SectionSummary {
-                    heading: h.text.clone(),
-                    level: h.level,
-                    word_count: s.word_count(),
-                })
-            })
-            .collect();
-
-        let content = if summary {
-            None
-        } else if let Some(requested) = sections {
-            let requested_lower: Vec<String> = requested.iter().map(|s| s.to_lowercase()).collect();
-            let mut filtered = String::new();
-            for section in &note.sections {
-                if let Some(h) = &section.heading
-                    && requested_lower.contains(&h.text.to_lowercase())
-                {
-                    for _ in 0..h.level {
-                        filtered.push('#');
-                    }
-                    filtered.push(' ');
-                    filtered.push_str(&h.text);
-                    filtered.push('\n');
-                    filtered.push_str(&section.content);
-                }
-            }
-            Some(filtered)
-        } else {
-            Some(note.to_string())
-        };
-
-        let links = if include_links {
-            Some(note.links().iter().map(|l| link_to_info(l)).collect())
-        } else {
-            None
-        };
-
-        let frontmatter = if include_frontmatter {
-            note.frontmatter.clone()
-        } else {
-            None
-        };
-
-        Ok(ReadNoteResponse {
-            path: path.to_string(),
-            title: note.title.clone(),
-            revision,
-            frontmatter,
-            content,
-            sections: if summary || sections.is_some() {
-                Some(section_summaries)
-            } else {
-                None
-            },
-            links,
-        })
-    }
-
     pub async fn search_notes(
         &self,
         query: &str,
@@ -918,7 +701,7 @@ impl TarnCore {
                 path: file_path.to_string(),
                 title: note.title.clone(),
                 tags,
-                word_count: note.word_count(),
+                token_count: note.word_count(),
             });
         }
 
@@ -1121,7 +904,7 @@ impl TarnCore {
             revision,
             frontmatter: note.frontmatter.clone(),
             content: note.to_string(),
-            word_count: note.word_count(),
+            token_count: note.word_count(),
             tags,
         })
     }
@@ -1130,14 +913,13 @@ impl TarnCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::builder::TarnBuilder;
+    use crate::common::Buildable;
+    use crate::core::config::TarnConfig;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, TarnCore) {
         let dir = TempDir::new().unwrap();
-        let core = TarnBuilder::local(dir.path().to_path_buf())
-            .build()
-            .unwrap();
+        let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
         (dir, core)
     }
 
@@ -1151,11 +933,8 @@ mod tests {
         assert_eq!(resp.path, "hello.md");
 
         // Verify content via read
-        let read = core
-            .read_note("hello.md", None, false, false, false)
-            .await
-            .unwrap();
-        assert_eq!(read.content.unwrap().trim(), "# Hello\nWorld");
+        let read = core.note_resource("hello.md").await.unwrap();
+        assert_eq!(read.content.trim(), "# Hello\nWorld");
     }
 
     #[tokio::test]
@@ -1186,11 +965,8 @@ mod tests {
             .unwrap();
         assert_eq!(updated.path, "note.md");
 
-        let read = core
-            .read_note("note.md", None, false, false, false)
-            .await
-            .unwrap();
-        assert_eq!(read.content.unwrap().trim(), "updated content");
+        let read = core.note_resource("note.md").await.unwrap();
+        assert_eq!(read.content.trim(), "updated content");
     }
 
     #[tokio::test]
@@ -1229,11 +1005,8 @@ mod tests {
         .await
         .unwrap();
 
-        let read = core
-            .read_note("note.md", None, false, false, false)
-            .await
-            .unwrap();
-        assert_eq!(read.content.unwrap().trim(), "qux bar foo baz");
+        let read = core.note_resource("note.md").await.unwrap();
+        assert_eq!(read.content.trim(), "qux bar foo baz");
     }
 
     #[tokio::test]
@@ -1247,11 +1020,8 @@ mod tests {
             .await
             .unwrap();
 
-        let read = core
-            .read_note("note.md", None, false, false, false)
-            .await
-            .unwrap();
-        assert_eq!(read.content.unwrap().trim(), "qux bar qux baz");
+        let read = core.note_resource("note.md").await.unwrap();
+        assert_eq!(read.content.trim(), "qux bar qux baz");
     }
 
     #[tokio::test]
@@ -1271,11 +1041,8 @@ mod tests {
         .await
         .unwrap();
 
-        let read = core
-            .read_note("note.md", None, false, false, false)
-            .await
-            .unwrap();
-        assert_eq!(read.content.unwrap().trim(), "date: REDACTED and REDACTED");
+        let read = core.note_resource("note.md").await.unwrap();
+        assert_eq!(read.content.trim(), "date: REDACTED and REDACTED");
     }
 
     #[tokio::test]

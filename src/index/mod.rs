@@ -3,8 +3,10 @@
 //! The index enables fast queries by AI agents without re-parsing notes on every operation.
 //! It supports multiple backends: InMemoryStore, SqliteStore, DynamoDbStore, PostgresStore.
 
+pub mod config;
 pub mod in_memory;
 
+pub use config::{IndexBuildError, IndexConfig};
 pub use in_memory::InMemoryIndex;
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +14,6 @@ use thiserror::Error;
 
 use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::note_handler::Note;
-use std::path::PathBuf;
 
 use crate::tokenizer::TokenizerConfig;
 
@@ -76,8 +77,8 @@ pub struct SectionEntry {
     pub tags: Vec<String>,
     /// Links found in this section.
     pub links: Vec<IndexLink>,
-    /// Word count of the section content.
-    pub word_count: usize,
+    /// Token count of the section content.
+    pub token_count: usize,
     /// Revision token for change detection.
     pub revision: RevisionToken,
 }
@@ -117,21 +118,6 @@ pub enum IndexError {
     /// A backend-specific error occurred.
     #[error("backend error: {0}")]
     Backend(String),
-}
-
-// ---------------------------------------------------------------------------
-// Index config
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IndexConfig {
-    InMemory {
-        #[serde(default)]
-        tokenizer: TokenizerConfig,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        persistence_path: Option<PathBuf>,
-    },
 }
 
 // ---------------------------------------------------------------------------
