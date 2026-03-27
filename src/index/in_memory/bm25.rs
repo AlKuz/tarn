@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::SectionId;
+use crate::common::VaultPath;
 
 /// BM25 algorithm parameters.
 const K1: f32 = 1.2; // Term frequency saturation
@@ -25,10 +25,10 @@ pub struct DocumentData {
 /// externally before calling `add_document` or `search`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BM25Index {
-    /// term -> [(section_id, term_frequency)]
-    inverted: HashMap<String, Vec<(SectionId, u32)>>,
-    /// section_id -> DocumentData
-    documents: HashMap<SectionId, DocumentData>,
+    /// term -> [(section_path, term_frequency)]
+    inverted: HashMap<String, Vec<(VaultPath, u32)>>,
+    /// section_path -> DocumentData
+    documents: HashMap<VaultPath, DocumentData>,
     /// Total document count
     doc_count: usize,
     /// Sum of all document lengths (for avgdl calculation)
@@ -46,9 +46,9 @@ impl BM25Index {
     }
 
     /// Add a document to the index from pre-tokenized input.
-    pub fn add_document(&mut self, section_id: SectionId, tokens: &[String]) {
+    pub fn add_document(&mut self, section_path: VaultPath, tokens: &[String]) {
         // Remove existing document if present
-        self.remove_document(&section_id);
+        self.remove_document(&section_path);
 
         let doc_length = tokens.len() as u32;
 
@@ -63,12 +63,12 @@ impl BM25Index {
             self.inverted
                 .entry(term.clone())
                 .or_default()
-                .push((section_id.clone(), *freq));
+                .push((section_path.clone(), *freq));
         }
 
         // Store document data
         self.documents.insert(
-            section_id,
+            section_path,
             DocumentData {
                 term_freqs,
                 doc_length,
@@ -80,8 +80,8 @@ impl BM25Index {
     }
 
     /// Remove a document from the index.
-    pub fn remove_document(&mut self, section_id: &SectionId) {
-        if let Some(doc_data) = self.documents.remove(section_id) {
+    pub fn remove_document(&mut self, section_path: &VaultPath) {
+        if let Some(doc_data) = self.documents.remove(section_path) {
             // Update statistics
             self.doc_count = self.doc_count.saturating_sub(1);
             self.total_doc_length = self
@@ -91,7 +91,7 @@ impl BM25Index {
             // Remove from inverted index
             for term in doc_data.term_freqs.keys() {
                 if let Some(postings) = self.inverted.get_mut(term) {
-                    postings.retain(|(id, _)| id != section_id);
+                    postings.retain(|(id, _)| id != section_path);
                     if postings.is_empty() {
                         self.inverted.remove(term);
                     }
@@ -102,8 +102,8 @@ impl BM25Index {
 
     /// Search the index with BM25 scoring from pre-tokenized query.
     ///
-    /// Returns (section_id, score) pairs sorted by score descending.
-    pub fn search(&self, query_tokens: &[String], limit: usize) -> Vec<(SectionId, f32)> {
+    /// Returns (section_path, score) pairs sorted by score descending.
+    pub fn search(&self, query_tokens: &[String], limit: usize) -> Vec<(VaultPath, f32)> {
         if query_tokens.is_empty() || self.doc_count == 0 {
             return Vec::new();
         }
@@ -111,7 +111,7 @@ impl BM25Index {
         let avgdl = self.total_doc_length as f32 / self.doc_count as f32;
 
         // Accumulate scores per document
-        let mut scores: HashMap<SectionId, f32> = HashMap::new();
+        let mut scores: HashMap<VaultPath, f32> = HashMap::new();
 
         for term in query_tokens {
             if let Some(postings) = self.inverted.get(term) {
@@ -119,8 +119,8 @@ impl BM25Index {
                 let n = postings.len() as f32;
                 let idf = ((self.doc_count as f32 - n + 0.5) / (n + 0.5) + 1.0).ln();
 
-                for (section_id, tf) in postings {
-                    let doc_data = self.documents.get(section_id).unwrap();
+                for (section_path, tf) in postings {
+                    let doc_data = self.documents.get(section_path).unwrap();
                     let dl = doc_data.doc_length as f32;
 
                     // BM25 term score: IDF * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl/avgdl))
@@ -128,7 +128,7 @@ impl BM25Index {
                     let term_score =
                         idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * dl / avgdl));
 
-                    *scores.entry(section_id.clone()).or_default() += term_score;
+                    *scores.entry(section_path.clone()).or_default() += term_score;
                 }
             }
         }
@@ -150,26 +150,24 @@ impl BM25Index {
     }
 
     /// Check if a section is indexed.
-    pub fn contains(&self, section_id: &SectionId) -> bool {
-        self.documents.contains_key(section_id)
+    pub fn contains(&self, section_path: &VaultPath) -> bool {
+        self.documents.contains_key(section_path)
     }
 
     /// Get the document length (token count) for a section.
-    pub fn doc_length(&self, section_id: &SectionId) -> Option<u32> {
-        self.documents.get(section_id).map(|d| d.doc_length)
+    pub fn doc_length(&self, section_path: &VaultPath) -> Option<u32> {
+        self.documents.get(section_path).map(|d| d.doc_length)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::VaultPath;
     use crate::tokenizer::{NaiveTokenizer, Tokenizer};
 
-    fn section_id(path: &str, headings: &[&str]) -> SectionId {
-        let vault_path = VaultPath::new(path).unwrap();
-        let heading_path: Vec<String> = headings.iter().map(|s| s.to_string()).collect();
-        SectionId::new(&vault_path, &heading_path)
+    fn section_path(path: &str, headings: &[&str]) -> VaultPath {
+        let heading_path = headings.join("/");
+        VaultPath::new(format!("{path}#{heading_path}")).unwrap()
     }
 
     fn tokenize(text: &str) -> Vec<String> {
@@ -184,9 +182,9 @@ mod tests {
     fn add_and_search() {
         let mut index = make_index();
 
-        let s1 = section_id("rust-guide.md", &["Introduction"]);
-        let s2 = section_id("python-guide.md", &["Introduction"]);
-        let s3 = section_id("rust-web.md", &["Actix"]);
+        let s1 = section_path("rust-guide.md", &["Introduction"]);
+        let s2 = section_path("python-guide.md", &["Introduction"]);
+        let s3 = section_path("rust-web.md", &["Actix"]);
 
         index.add_document(
             s1.clone(),
@@ -208,7 +206,7 @@ mod tests {
     fn remove_document() {
         let mut index = make_index();
 
-        let s1 = section_id("note.md", &[]);
+        let s1 = section_path("note.md", &[]);
         index.add_document(s1.clone(), &tokenize("Rust programming language"));
 
         assert!(index.contains(&s1));
@@ -223,7 +221,7 @@ mod tests {
     fn clear_removes_all() {
         let mut index = make_index();
 
-        let s1 = section_id("note.md", &[]);
+        let s1 = section_path("note.md", &[]);
         index.add_document(s1.clone(), &tokenize("Rust programming"));
 
         index.clear();
@@ -236,7 +234,7 @@ mod tests {
     fn empty_query_returns_empty() {
         let mut index = make_index();
 
-        let s1 = section_id("note.md", &[]);
+        let s1 = section_path("note.md", &[]);
         index.add_document(s1, &tokenize("Some content"));
 
         assert!(index.search(&tokenize(""), 10).is_empty());
@@ -247,7 +245,7 @@ mod tests {
         let mut index = make_index();
 
         for i in 0..10 {
-            let s = section_id(&format!("note{i}.md"), &[]);
+            let s = section_path(&format!("note{i}.md"), &[]);
             index.add_document(s, &tokenize("rust programming language"));
         }
 
@@ -259,8 +257,8 @@ mod tests {
     fn bm25_scores_term_frequency() {
         let mut index = make_index();
 
-        let s1 = section_id("note1.md", &[]);
-        let s2 = section_id("note2.md", &[]);
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
 
         index.add_document(s1.clone(), &tokenize("Rust is great."));
         index.add_document(
@@ -277,7 +275,7 @@ mod tests {
     fn update_document_replaces_content() {
         let mut index = make_index();
 
-        let s1 = section_id("note.md", &[]);
+        let s1 = section_path("note.md", &[]);
 
         index.add_document(s1.clone(), &tokenize("Python programming"));
         assert!(index.search(&tokenize("python"), 10).len() == 1);
@@ -292,7 +290,7 @@ mod tests {
     fn doc_length_returns_token_count() {
         let mut index = make_index();
 
-        let s1 = section_id("note.md", &[]);
+        let s1 = section_path("note.md", &[]);
         index.add_document(s1.clone(), &tokenize("hello world foo"));
 
         assert_eq!(index.doc_length(&s1), Some(3));

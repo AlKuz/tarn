@@ -20,54 +20,6 @@ use crate::tokenizer::{Tokenizer, TokenizerConfig};
 use super::{Index, IndexConfig, IndexError, IndexLink, IndexMeta, SearchParams, SectionEntry};
 
 // ---------------------------------------------------------------------------
-// SectionId
-// ---------------------------------------------------------------------------
-
-/// Natural ID for a section: `{note_path}#{heading1/heading2/heading3}`
-///
-/// Examples:
-/// - `projects/alpha.md#` (root section, no heading)
-/// - `projects/alpha.md#Goals` (under # Goals)
-/// - `projects/alpha.md#Goals/Q1` (under ## Q1 under # Goals)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SectionId(String);
-
-impl SectionId {
-    /// Create section ID from note path and heading path.
-    pub fn new(note_path: &VaultPath, heading_path: &[String]) -> Self {
-        let section_path = heading_path.join("/");
-        Self(format!("{}#{}", note_path.as_str(), section_path))
-    }
-
-    /// Extract the note path portion.
-    pub fn note_path(&self) -> VaultPath {
-        let (path, _) = self.0.split_once('#').unwrap_or((&self.0, ""));
-        VaultPath::new(path).expect("valid path in section id")
-    }
-
-    /// Extract the section/heading path portion.
-    pub fn section_path(&self) -> Vec<String> {
-        let (_, section) = self.0.split_once('#').unwrap_or(("", ""));
-        if section.is_empty() {
-            Vec::new()
-        } else {
-            section.split('/').map(String::from).collect()
-        }
-    }
-
-    /// Get the raw string representation.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for SectionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // InMemoryIndex errors
 // ---------------------------------------------------------------------------
 
@@ -97,7 +49,7 @@ struct IndexData {
     #[serde(default)]
     version: u32,
     meta: IndexMeta,
-    sections: HashMap<SectionId, SectionEntry>,
+    sections: HashMap<VaultPath, SectionEntry>,
     tag_index: TagIndex,
     bm25_index: BM25Index,
 }
@@ -184,6 +136,13 @@ impl InMemoryIndex {
         Ok(())
     }
 
+    /// Build a section VaultPath from a note path and heading path.
+    fn make_section_path(note_path: &VaultPath, heading_path: &[String]) -> VaultPath {
+        let section_path_str = heading_path.join("/");
+        VaultPath::new(format!("{}#{}", note_path.as_str(), section_path_str))
+            .expect("valid section path from note path and headings")
+    }
+
     /// Index a note, extracting all sections.
     fn index_note(
         inner: &mut IndexData,
@@ -199,7 +158,7 @@ impl InMemoryIndex {
             .unwrap_or_default();
 
         for section in &note.sections {
-            let section_id = SectionId::new(note_path, &section.heading_path);
+            let section_path = Self::make_section_path(note_path, &section.heading_path);
 
             // Combine frontmatter tags with inline tags
             let mut all_tags: Vec<String> = frontmatter_tags.clone();
@@ -219,30 +178,30 @@ impl InMemoryIndex {
 
             // Add to BM25 index
             let tokens = tokenizer.tokenize(&section.content);
-            inner.bm25_index.add_document(section_id.clone(), &tokens);
+            inner.bm25_index.add_document(section_path.clone(), &tokens);
 
             // Add to tag index
-            inner.tag_index.add(section_id.clone(), &all_tags);
+            inner.tag_index.add(section_path.clone(), &all_tags);
 
             // Store section entry
-            inner.sections.insert(section_id, entry);
+            inner.sections.insert(section_path, entry);
         }
     }
 
     /// Remove all sections for a note path.
     fn remove_note_sections(inner: &mut IndexData, note_path: &VaultPath) {
-        // Find all section IDs for this note
-        let section_ids: Vec<SectionId> = inner
+        // Find all section paths for this note
+        let section_paths: Vec<VaultPath> = inner
             .sections
             .keys()
-            .filter(|id| &id.note_path() == note_path)
+            .filter(|path| path.note_path().as_ref() == Some(note_path))
             .cloned()
             .collect();
 
-        for section_id in section_ids {
-            inner.sections.remove(&section_id);
-            inner.tag_index.remove(&section_id);
-            inner.bm25_index.remove_document(&section_id);
+        for section_path in section_paths {
+            inner.sections.remove(&section_path);
+            inner.tag_index.remove(&section_path);
+            inner.bm25_index.remove_document(&section_path);
         }
     }
 }
@@ -265,7 +224,7 @@ impl Index for InMemoryIndex {
         let sections: Vec<SectionEntry> = inner
             .sections
             .iter()
-            .filter(|(id, _)| &id.note_path() == path)
+            .filter(|(key, _)| key.note_path().as_ref() == Some(path))
             .map(|(_, entry)| entry.clone())
             .collect();
 
@@ -339,8 +298,8 @@ impl Index for InMemoryIndex {
         // Filter results
         let mut results: Vec<(SectionEntry, f32)> = bm25_results
             .into_iter()
-            .filter_map(|(section_id, score)| {
-                let entry = inner.sections.get(&section_id)?;
+            .filter_map(|(section_path, score)| {
+                let entry = inner.sections.get(&section_path)?;
 
                 // Apply folder filter
                 if let Some(folder) = &params.folder
@@ -534,24 +493,24 @@ mod tests {
     }
 
     #[test]
-    fn section_id_parsing() {
+    fn section_path_construction() {
         let path = VaultPath::new("projects/alpha.md").unwrap();
 
         // Root section
-        let id = SectionId::new(&path, &[]);
-        assert_eq!(id.as_str(), "projects/alpha.md#");
-        assert_eq!(id.note_path(), path);
-        assert!(id.section_path().is_empty());
+        let sp = InMemoryIndex::make_section_path(&path, &[]);
+        assert_eq!(sp.as_str(), "projects/alpha.md#");
+        assert_eq!(sp.note_path(), Some(path.clone()));
+        assert!(sp.section_headings().is_empty());
 
         // Single heading
-        let id = SectionId::new(&path, &["Goals".to_string()]);
-        assert_eq!(id.as_str(), "projects/alpha.md#Goals");
-        assert_eq!(id.section_path(), vec!["Goals"]);
+        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string()]);
+        assert_eq!(sp.as_str(), "projects/alpha.md#Goals");
+        assert_eq!(sp.section_headings(), vec!["Goals"]);
 
         // Nested headings
-        let id = SectionId::new(&path, &["Goals".to_string(), "Q1".to_string()]);
-        assert_eq!(id.as_str(), "projects/alpha.md#Goals/Q1");
-        assert_eq!(id.section_path(), vec!["Goals", "Q1"]);
+        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string(), "Q1".to_string()]);
+        assert_eq!(sp.as_str(), "projects/alpha.md#Goals/Q1");
+        assert_eq!(sp.section_headings(), vec!["Goals", "Q1"]);
     }
 
     #[tokio::test]

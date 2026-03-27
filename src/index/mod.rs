@@ -5,7 +5,7 @@
 
 pub mod in_memory;
 
-pub use in_memory::{InMemoryIndex, SectionId};
+pub use in_memory::InMemoryIndex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

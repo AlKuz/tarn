@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::SectionId;
+use crate::common::VaultPath;
 
 /// Inverted index for tag-based filtering.
 ///
@@ -13,10 +13,10 @@ use super::SectionId;
 /// - section -> tags (for efficient removal)
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TagIndex {
-    /// tag -> set of section IDs
-    index: HashMap<String, HashSet<SectionId>>,
-    /// section_id -> tags (for efficient removal)
-    reverse: HashMap<SectionId, HashSet<String>>,
+    /// tag -> set of section paths
+    index: HashMap<String, HashSet<VaultPath>>,
+    /// section_path -> tags (for efficient removal)
+    reverse: HashMap<VaultPath, HashSet<String>>,
 }
 
 impl TagIndex {
@@ -26,25 +26,25 @@ impl TagIndex {
     }
 
     /// Add tags for a section.
-    pub fn add(&mut self, section_id: SectionId, tags: &[String]) {
+    pub fn add(&mut self, section_path: VaultPath, tags: &[String]) {
         let tag_set: HashSet<String> = tags.iter().cloned().collect();
 
         for tag in &tag_set {
             self.index
                 .entry(tag.clone())
                 .or_default()
-                .insert(section_id.clone());
+                .insert(section_path.clone());
         }
 
-        self.reverse.insert(section_id, tag_set);
+        self.reverse.insert(section_path, tag_set);
     }
 
     /// Remove a section and all its tag associations.
-    pub fn remove(&mut self, section_id: &SectionId) {
-        if let Some(tags) = self.reverse.remove(section_id) {
+    pub fn remove(&mut self, section_path: &VaultPath) {
+        if let Some(tags) = self.reverse.remove(section_path) {
             for tag in tags {
                 if let Some(sections) = self.index.get_mut(&tag) {
-                    sections.remove(section_id);
+                    sections.remove(section_path);
                     if sections.is_empty() {
                         self.index.remove(&tag);
                     }
@@ -58,14 +58,14 @@ impl TagIndex {
     /// - `include`: section must have at least one of these tags (None = no filter)
     /// - `exclude`: section must have none of these tags (None = no filter)
     ///
-    /// Returns all matching section IDs.
+    /// Returns all matching section paths.
     pub fn filter(
         &self,
         include: Option<&HashSet<String>>,
         exclude: Option<&HashSet<String>>,
-    ) -> HashSet<SectionId> {
+    ) -> HashSet<VaultPath> {
         // Start with sections matching include criteria
-        let candidates: HashSet<SectionId> = match include {
+        let candidates: HashSet<VaultPath> = match include {
             Some(tags) if !tags.is_empty() => {
                 // Union of all sections that have any of the include tags
                 tags.iter()
@@ -83,9 +83,9 @@ impl TagIndex {
         match exclude {
             Some(tags) if !tags.is_empty() => candidates
                 .into_iter()
-                .filter(|section_id| {
+                .filter(|section_path| {
                     self.reverse
-                        .get(section_id)
+                        .get(section_path)
                         .is_none_or(|section_tags| section_tags.is_disjoint(tags))
                 })
                 .collect(),
@@ -100,29 +100,27 @@ impl TagIndex {
     }
 
     /// Get all tags for a section.
-    pub fn tags_for_section(&self, section_id: &SectionId) -> Option<&HashSet<String>> {
-        self.reverse.get(section_id)
+    pub fn tags_for_section(&self, section_path: &VaultPath) -> Option<&HashSet<String>> {
+        self.reverse.get(section_path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::VaultPath;
 
-    fn section_id(path: &str, headings: &[&str]) -> SectionId {
-        let vault_path = VaultPath::new(path).unwrap();
-        let heading_path: Vec<String> = headings.iter().map(|s| s.to_string()).collect();
-        SectionId::new(&vault_path, &heading_path)
+    fn section_path(path: &str, headings: &[&str]) -> VaultPath {
+        let heading_path = headings.join("/");
+        VaultPath::new(format!("{path}#{heading_path}")).unwrap()
     }
 
     #[test]
     fn add_and_filter_by_include() {
         let mut index = TagIndex::new();
 
-        let s1 = section_id("note1.md", &[]);
-        let s2 = section_id("note2.md", &[]);
-        let s3 = section_id("note3.md", &[]);
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+        let s3 = section_path("note3.md", &[]);
 
         index.add(s1.clone(), &["rust".into(), "programming".into()]);
         index.add(s2.clone(), &["rust".into(), "web".into()]);
@@ -140,8 +138,8 @@ mod tests {
     fn filter_by_exclude() {
         let mut index = TagIndex::new();
 
-        let s1 = section_id("note1.md", &[]);
-        let s2 = section_id("note2.md", &[]);
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
 
         index.add(s1.clone(), &["rust".into(), "draft".into()]);
         index.add(s2.clone(), &["rust".into()]);
@@ -157,9 +155,9 @@ mod tests {
     fn filter_include_and_exclude() {
         let mut index = TagIndex::new();
 
-        let s1 = section_id("note1.md", &[]);
-        let s2 = section_id("note2.md", &[]);
-        let s3 = section_id("note3.md", &[]);
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+        let s3 = section_path("note3.md", &[]);
 
         index.add(s1.clone(), &["rust".into(), "published".into()]);
         index.add(s2.clone(), &["rust".into(), "draft".into()]);
@@ -179,7 +177,7 @@ mod tests {
     fn remove_section() {
         let mut index = TagIndex::new();
 
-        let s1 = section_id("note1.md", &[]);
+        let s1 = section_path("note1.md", &[]);
         index.add(s1.clone(), &["rust".into(), "programming".into()]);
 
         assert!(index.tags_for_section(&s1).is_some());
@@ -198,7 +196,7 @@ mod tests {
     fn clear_removes_all() {
         let mut index = TagIndex::new();
 
-        let s1 = section_id("note1.md", &[]);
+        let s1 = section_path("note1.md", &[]);
         index.add(s1.clone(), &["rust".into()]);
 
         index.clear();
@@ -210,8 +208,8 @@ mod tests {
     fn empty_include_returns_all() {
         let mut index = TagIndex::new();
 
-        let s1 = section_id("note1.md", &[]);
-        let s2 = section_id("note2.md", &[]);
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
 
         index.add(s1.clone(), &["rust".into()]);
         index.add(s2.clone(), &["python".into()]);
