@@ -5,7 +5,7 @@ mod vault_path;
 pub use data_uri::DataURI;
 pub use revision_token::RevisionToken;
 use serde::{Serialize, de::DeserializeOwned};
-pub use vault_path::{PathKind, VaultPath, VaultPathError};
+pub use vault_path::{VaultPath, VaultPathError};
 
 pub trait Configurable {
     type Config: Serialize + DeserializeOwned;

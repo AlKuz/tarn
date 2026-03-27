@@ -15,58 +15,70 @@ pub enum VaultPathError {
     InvalidRoot,
     #[error("path is not under root")]
     NotUnderRoot,
-}
-
-/// The kind of path in a vault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PathKind {
-    /// Markdown note (.md extension)
-    Note,
-    /// Image file (png, jpg, gif, etc.)
-    Image,
-    /// Folder (ends with /)
-    Folder,
-    /// Any other file type
-    Other,
+    #[error("invalid sub-note path: {0}")]
+    InvalidSubNotePath(String),
 }
 
 /// A validated, platform-independent vault path.
 ///
-/// Internally stores the path with forward slashes (`/`) as separators,
-/// regardless of the platform. This ensures consistent behavior for shared
-/// indexes across Unix and Windows systems.
+/// Each variant encodes the type of resource in the vault:
+/// - `Root` — the vault root (empty string)
+/// - `Folder(String)` — a folder, always ends with `/` (e.g. `"projects/alpha/"`)
+/// - `Note(String)` — a markdown note with `.md` extension (e.g. `"projects/alpha.md"`)
+/// - `Section(String)` — a section within a note (e.g. `"projects/alpha.md#Goals/Q1"`)
+/// - `Block(String)` — a block reference within a note (e.g. `"note.md#^block-id"`)
+/// - `Image(String)` — an image file (e.g. `"assets/logo.png"`)
+/// - `Other(String)` — any other file type (e.g. `"data.json"`)
 ///
-/// The path kind is determined by:
-/// - Trailing `/` -> `PathKind::Folder`
-/// - `.md` extension -> `PathKind::Note`
-/// - Image extensions (.png, .jpg, etc.) -> `PathKind::Image`
-/// - Anything else -> `PathKind::Other`
+/// Internally stores paths with forward slashes (`/`) as separators,
+/// regardless of the platform.
 ///
 /// # Examples
 ///
 /// ```
-/// use tarn::common::{VaultPath, PathKind};
+/// use tarn::common::VaultPath;
 ///
 /// let note: VaultPath = "projects/alpha/design.md".try_into().unwrap();
-/// assert_eq!(note.kind(), PathKind::Note);
+/// assert!(note.is_note());
 ///
-/// let img: VaultPath = "assets/logo.png".try_into().unwrap();
-/// assert_eq!(img.kind(), PathKind::Image);
+/// let section: VaultPath = "projects/alpha.md#Goals".try_into().unwrap();
+/// assert!(section.is_section());
 ///
 /// let folder: VaultPath = "projects/".try_into().unwrap();
-/// assert_eq!(folder.kind(), PathKind::Folder);
+/// assert!(folder.is_folder());
 ///
-/// let other: VaultPath = "data.json".try_into().unwrap();
-/// assert_eq!(other.kind(), PathKind::Other);
+/// let root = VaultPath::new("").unwrap();
+/// assert!(root.is_root());
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct VaultPath(String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VaultPath {
+    /// The vault root (empty string).
+    Root,
+    /// A folder path (ends with `/`).
+    Folder(String),
+    /// A markdown note (`.md` extension).
+    Note(String),
+    /// A section within a note (`note.md#Heading/Sub`).
+    Section(String),
+    /// A block reference within a note (`note.md#^block-id`).
+    Block(String),
+    /// An image file (png, jpg, gif, etc.).
+    Image(String),
+    /// Any other file type.
+    Other(String),
+}
+
+/// Image extensions recognized by the vault.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tiff", "tif",
+];
 
 impl VaultPath {
     /// Creates a new VaultPath, validating the path and normalizing separators.
     ///
     /// An empty string represents the root folder.
     /// Bare separators like "/" or "\\" are rejected — only "" is valid root.
+    /// Strings containing `#` are parsed as Section or Block paths.
     pub fn new(path: impl AsRef<str>) -> Result<Self, VaultPathError> {
         let path = path.as_ref();
         let normalized = normalize_separators(path);
@@ -75,7 +87,7 @@ impl VaultPath {
         // original input was truly empty. Bare separators like "/" are rejected.
         if normalized.is_empty() {
             if path.is_empty() {
-                return Ok(VaultPath(String::new()));
+                return Ok(VaultPath::Root);
             }
             return Err(VaultPathError::InvalidRoot);
         }
@@ -84,27 +96,100 @@ impl VaultPath {
             return Err(VaultPathError::PathTraversal);
         }
 
-        Ok(VaultPath(normalized))
+        // Section or Block: contains `#` separator
+        if normalized.contains('#') {
+            let (note_part, fragment) = normalized
+                .split_once('#')
+                .expect("already checked contains #");
+
+            // Validate the note portion is a valid note path
+            if note_part.is_empty() || !note_part.ends_with(".md") {
+                return Err(VaultPathError::InvalidSubNotePath(
+                    "must reference a .md note".to_string(),
+                ));
+            }
+
+            // Block reference: fragment starts with `^`
+            if fragment.starts_with('^') {
+                return Ok(VaultPath::Block(normalized));
+            }
+
+            return Ok(VaultPath::Section(normalized));
+        }
+
+        // Folder: ends with `/`
+        if normalized.ends_with('/') {
+            return Ok(VaultPath::Folder(normalized));
+        }
+
+        // Detect by extension
+        match file_extension(&normalized) {
+            Some("md") => Ok(VaultPath::Note(normalized)),
+            Some(ext) if IMAGE_EXTENSIONS.contains(&ext) => Ok(VaultPath::Image(normalized)),
+            _ => Ok(VaultPath::Other(normalized)),
+        }
     }
 
     /// Returns true if this is the root folder.
     pub fn is_root(&self) -> bool {
-        self.0.is_empty()
+        matches!(self, VaultPath::Root)
+    }
+
+    /// Returns true if this is a Folder (or Root).
+    pub fn is_folder(&self) -> bool {
+        matches!(self, VaultPath::Root | VaultPath::Folder(_))
+    }
+
+    /// Returns true if this is a Note.
+    pub fn is_note(&self) -> bool {
+        matches!(self, VaultPath::Note(_))
+    }
+
+    /// Returns true if this is a Section.
+    pub fn is_section(&self) -> bool {
+        matches!(self, VaultPath::Section(_))
+    }
+
+    /// Returns true if this is a Block reference.
+    pub fn is_block(&self) -> bool {
+        matches!(self, VaultPath::Block(_))
+    }
+
+    /// Returns true if this is an Image.
+    pub fn is_image(&self) -> bool {
+        matches!(self, VaultPath::Image(_))
     }
 
     /// Returns the normalized path as a string slice (always uses `/` separators).
     pub fn as_str(&self) -> &str {
-        &self.0
+        match self {
+            VaultPath::Root => "",
+            VaultPath::Folder(s)
+            | VaultPath::Note(s)
+            | VaultPath::Section(s)
+            | VaultPath::Block(s)
+            | VaultPath::Image(s)
+            | VaultPath::Other(s) => s,
+        }
     }
 
     /// Converts to a platform-native `PathBuf`.
+    ///
+    /// For Section and Block variants, returns the note portion only (before `#`).
     pub fn as_path_buf(&self) -> PathBuf {
-        PathBuf::from(self.as_str())
+        match self {
+            VaultPath::Section(s) | VaultPath::Block(s) => {
+                let note_part = s.split_once('#').map(|(p, _)| p).unwrap_or(s);
+                PathBuf::from(note_part)
+            }
+            _ => PathBuf::from(self.as_str()),
+        }
     }
 
     /// Creates a VaultPath from a filesystem Path, making it relative to the given root.
     ///
     /// Returns `NotUnderRoot` error if path is not under root.
+    /// Never produces Section or Block variants (filesystem paths don't contain `#`).
     pub fn from_path(path: &Path, root: &Path) -> Result<Self, VaultPathError> {
         let relative = path
             .strip_prefix(root)
@@ -114,63 +199,106 @@ impl VaultPath {
         VaultPath::new(relative)
     }
 
-    /// Returns the kind of this path.
-    pub fn kind(&self) -> PathKind {
-        // Root or trailing slash means folder
-        if self.0.is_empty() || self.0.ends_with('/') {
-            return PathKind::Folder;
-        }
-
-        match self.extension() {
-            Some("md") => PathKind::Note,
-            Some(
-                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "tiff" | "tif",
-            ) => PathKind::Image,
-            _ => PathKind::Other,
-        }
-    }
-
     /// Returns the file extension in lowercase, or None if no extension.
+    ///
+    /// For Section and Block variants, returns the extension of the note portion.
     pub fn extension(&self) -> Option<&str> {
-        let path = self.0.trim_end_matches('/');
-        let filename = path.rsplit('/').next()?;
-        let (_, ext) = filename.rsplit_once('.')?;
-        // Avoid treating hidden files like ".gitignore" as having extension "gitignore"
-        if filename.starts_with('.') && !filename[1..].contains('.') {
-            return None;
-        }
-        Some(ext)
-    }
-
-    /// Returns true if this is a Note.
-    pub fn is_note(&self) -> bool {
-        matches!(self.kind(), PathKind::Note)
-    }
-
-    /// Returns true if this is an Image.
-    pub fn is_image(&self) -> bool {
-        matches!(self.kind(), PathKind::Image)
-    }
-
-    /// Returns true if this is a Folder.
-    pub fn is_folder(&self) -> bool {
-        matches!(self.kind(), PathKind::Folder)
+        let path = match self {
+            VaultPath::Root => return None,
+            VaultPath::Section(s) | VaultPath::Block(s) => {
+                s.split_once('#').map(|(p, _)| p).unwrap_or(s)
+            }
+            _ => self.as_str(),
+        };
+        file_extension(path)
     }
 
     /// Returns the file stem (filename without extension).
+    ///
+    /// For Section and Block variants, returns the stem of the note portion.
     pub fn stem(&self) -> &str {
-        let path = self.0.trim_end_matches('/');
+        let path = match self {
+            VaultPath::Root => return "",
+            VaultPath::Section(s) | VaultPath::Block(s) => {
+                s.split_once('#').map(|(p, _)| p).unwrap_or(s)
+            }
+            _ => self.as_str(),
+        };
+        let path = path.trim_end_matches('/');
         let name = path.rsplit('/').next().unwrap_or(path);
         name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
     }
 
-    /// Returns the parent folder path, or None if at root.
+    /// Returns the parent path, or None if at root.
+    ///
+    /// Navigation hierarchy:
+    /// - `Section("folder/note.md#heading")` → `Note("folder/note.md")`
+    /// - `Block("folder/note.md#^id")` → `Note("folder/note.md")`
+    /// - `Note("folder/note.md")` → `Folder("folder/")`
+    /// - `Image("folder/img.png")` → `Folder("folder/")`
+    /// - `Folder("projects/alpha/")` → `Folder("projects/")`
+    /// - `Folder("projects/")` → `Root`
+    /// - `Root` → `None`
     pub fn parent(&self) -> Option<VaultPath> {
-        let path = self.0.trim_end_matches('/');
-        path.rsplit_once('/').map(|(parent, _)| {
-            // Parent is always a folder
-            VaultPath(format!("{parent}/"))
-        })
+        match self {
+            VaultPath::Root => None,
+            VaultPath::Section(s) | VaultPath::Block(s) => {
+                let note_part = s.split_once('#').map(|(p, _)| p).unwrap_or(s);
+                Some(VaultPath::Note(note_part.to_string()))
+            }
+            VaultPath::Folder(s) => {
+                let path = s.trim_end_matches('/');
+                match path.rsplit_once('/') {
+                    Some((parent, _)) => Some(VaultPath::Folder(format!("{parent}/"))),
+                    None => Some(VaultPath::Root),
+                }
+            }
+            VaultPath::Note(s) | VaultPath::Image(s) | VaultPath::Other(s) => s
+                .rsplit_once('/')
+                .map(|(parent, _)| VaultPath::Folder(format!("{parent}/"))),
+        }
+    }
+
+    /// For Section/Block, returns the Note portion. For Note, returns self clone. Others return None.
+    pub fn note_path(&self) -> Option<VaultPath> {
+        match self {
+            VaultPath::Section(s) | VaultPath::Block(s) => {
+                let note_part = s.split_once('#').map(|(p, _)| p).unwrap_or(s);
+                Some(VaultPath::Note(note_part.to_string()))
+            }
+            VaultPath::Note(_) => Some(self.clone()),
+            _ => None,
+        }
+    }
+
+    /// For Block, returns the block identifier (without `^`). Others return None.
+    ///
+    /// Example: `VaultPath::Block("note.md#^quote-of-the-day")` → `Some("quote-of-the-day")`
+    pub fn block_id(&self) -> Option<&str> {
+        match self {
+            VaultPath::Block(s) => {
+                let (_, fragment) = s.split_once('#').unwrap_or(("", ""));
+                Some(fragment.trim_start_matches('^'))
+            }
+            _ => None,
+        }
+    }
+
+    /// For Section, returns the heading path components. Others return empty vec.
+    ///
+    /// Example: `VaultPath::Section("note.md#Goals/Q1")` → `["Goals", "Q1"]`
+    pub fn section_headings(&self) -> Vec<String> {
+        match self {
+            VaultPath::Section(s) => {
+                let (_, section) = s.split_once('#').unwrap_or(("", ""));
+                if section.is_empty() {
+                    Vec::new()
+                } else {
+                    section.split('/').map(String::from).collect()
+                }
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Checks if this path is in the given folder (non-recursive).
@@ -179,15 +307,33 @@ impl VaultPath {
     }
 
     /// Checks if this path is under the given folder (recursive).
+    ///
+    /// For Section and Block variants, checks based on the note path portion.
     pub fn is_under_folder(&self, folder: &VaultPath) -> bool {
         if !folder.is_folder() {
             return false;
         }
-        let folder_path = folder.0.trim_end_matches('/');
+
+        // Get the file-path portion (for Section/Block, use only the note part)
+        let path = match self {
+            VaultPath::Root => return false,
+            VaultPath::Section(s) | VaultPath::Block(s) => {
+                s.split_once('#').map(|(p, _)| p).unwrap_or(s)
+            }
+            _ => self.as_str(),
+        };
+
+        let folder_path = match folder {
+            VaultPath::Root => return true,
+            VaultPath::Folder(f) => f.trim_end_matches('/'),
+            _ => unreachable!("checked is_folder above"),
+        };
+
         if folder_path.is_empty() {
             return true;
         }
-        let path = self.0.trim_end_matches('/');
+
+        let path = path.trim_end_matches('/');
         path.starts_with(folder_path)
             && path
                 .as_bytes()
@@ -199,6 +345,18 @@ impl VaultPath {
     pub fn ends_with(&self, suffix: &str) -> bool {
         self.as_str().ends_with(suffix)
     }
+}
+
+/// Extracts the file extension from a path string.
+fn file_extension(path: &str) -> Option<&str> {
+    let path = path.trim_end_matches('/');
+    let filename = path.rsplit('/').next()?;
+    let (_, ext) = filename.rsplit_once('.')?;
+    // Avoid treating hidden files like ".gitignore" as having extension "gitignore"
+    if filename.starts_with('.') && !filename[1..].contains('.') {
+        return None;
+    }
+    Some(ext)
 }
 
 /// Normalizes path separators to forward slashes.
@@ -217,7 +375,7 @@ impl FromStr for VaultPath {
 
 impl fmt::Display for VaultPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -253,12 +411,24 @@ impl TryFrom<&Path> for VaultPath {
     }
 }
 
+impl PartialOrd for VaultPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VaultPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
 impl Serialize for VaultPath {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.0)
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -277,10 +447,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_note_kind() {
+    fn detects_note() {
         let path = VaultPath::new("note.md").unwrap();
-        assert_eq!(path.kind(), PathKind::Note);
         assert!(path.is_note());
+        assert!(!path.is_folder());
+        assert!(!path.is_image());
+        assert!(!path.is_section());
         assert_eq!(path.as_str(), "note.md");
         assert_eq!(path.stem(), "note");
     }
@@ -291,28 +463,155 @@ mod tests {
             "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tiff", "tif",
         ] {
             let path = VaultPath::new(format!("image.{ext}")).unwrap();
-            assert_eq!(path.kind(), PathKind::Image, "Failed for {ext}");
-            assert!(path.is_image());
+            assert!(path.is_image(), "Failed for {ext}");
         }
     }
 
     #[test]
-    fn detects_folder_kind() {
+    fn detects_folder() {
         let path = VaultPath::new("projects/").unwrap();
-        assert_eq!(path.kind(), PathKind::Folder);
         assert!(path.is_folder());
+        assert!(!path.is_root());
 
         let nested = VaultPath::new("projects/alpha/").unwrap();
-        assert_eq!(nested.kind(), PathKind::Folder);
+        assert!(nested.is_folder());
     }
 
     #[test]
-    fn detects_other_kind() {
+    fn detects_other() {
         let path = VaultPath::new("data.json").unwrap();
-        assert_eq!(path.kind(), PathKind::Other);
+        assert!(matches!(path, VaultPath::Other(_)));
 
         let path = VaultPath::new("script.py").unwrap();
-        assert_eq!(path.kind(), PathKind::Other);
+        assert!(matches!(path, VaultPath::Other(_)));
+    }
+
+    #[test]
+    fn detects_section() {
+        let path = VaultPath::new("note.md#Goals").unwrap();
+        assert!(path.is_section());
+        assert_eq!(path.as_str(), "note.md#Goals");
+
+        let path = VaultPath::new("folder/note.md#Goals/Q1").unwrap();
+        assert!(path.is_section());
+        assert_eq!(path.section_headings(), vec!["Goals", "Q1"]);
+
+        // Root section (no heading)
+        let path = VaultPath::new("note.md#").unwrap();
+        assert!(path.is_section());
+        assert!(path.section_headings().is_empty());
+    }
+
+    #[test]
+    fn detects_block() {
+        let path = VaultPath::new("note.md#^block-id").unwrap();
+        assert!(path.is_block());
+        assert!(!path.is_section());
+        assert_eq!(path.as_str(), "note.md#^block-id");
+        assert_eq!(path.block_id(), Some("block-id"));
+
+        let path = VaultPath::new("folder/note.md#^quote-of-the-day").unwrap();
+        assert!(path.is_block());
+        assert_eq!(path.block_id(), Some("quote-of-the-day"));
+
+        // Block with just caret and id
+        let path = VaultPath::new("note.md#^37066d").unwrap();
+        assert!(path.is_block());
+        assert_eq!(path.block_id(), Some("37066d"));
+    }
+
+    #[test]
+    fn block_note_path() {
+        let block = VaultPath::new("folder/note.md#^block-id").unwrap();
+        assert_eq!(
+            block.note_path(),
+            Some(VaultPath::new("folder/note.md").unwrap())
+        );
+    }
+
+    #[test]
+    fn block_parent_is_note() {
+        let block = VaultPath::new("folder/note.md#^block-id").unwrap();
+        assert_eq!(
+            block.parent(),
+            Some(VaultPath::new("folder/note.md").unwrap())
+        );
+    }
+
+    #[test]
+    fn block_path_buf_returns_note() {
+        let block = VaultPath::new("folder/note.md#^block-id").unwrap();
+        assert_eq!(block.as_path_buf(), PathBuf::from("folder/note.md"));
+    }
+
+    #[test]
+    fn block_stem_and_extension() {
+        let block = VaultPath::new("folder/note.md#^block-id").unwrap();
+        assert_eq!(block.stem(), "note");
+        assert_eq!(block.extension(), Some("md"));
+    }
+
+    #[test]
+    fn block_is_under_folder() {
+        let block = VaultPath::new("projects/note.md#^block-id").unwrap();
+        let projects = VaultPath::new("projects/").unwrap();
+        assert!(block.is_under_folder(&projects));
+
+        let other = VaultPath::new("other/").unwrap();
+        assert!(!block.is_under_folder(&other));
+    }
+
+    #[test]
+    fn block_section_headings_empty() {
+        let block = VaultPath::new("note.md#^block-id").unwrap();
+        assert!(block.section_headings().is_empty());
+    }
+
+    #[test]
+    fn block_id_none_for_non_block() {
+        let note = VaultPath::new("note.md").unwrap();
+        assert_eq!(note.block_id(), None);
+
+        let section = VaultPath::new("note.md#Goals").unwrap();
+        assert_eq!(section.block_id(), None);
+    }
+
+    #[test]
+    fn serde_roundtrip_block() {
+        let block = VaultPath::new("note.md#^block-id").unwrap();
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(json, "\"note.md#^block-id\"");
+
+        let parsed: VaultPath = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+        assert!(parsed.is_block());
+    }
+
+    #[test]
+    fn sub_note_path_requires_md_note() {
+        let err = VaultPath::new("data.json#something").unwrap_err();
+        assert!(matches!(err, VaultPathError::InvalidSubNotePath(_)));
+
+        let err = VaultPath::new("#heading").unwrap_err();
+        assert!(matches!(err, VaultPathError::InvalidSubNotePath(_)));
+
+        let err = VaultPath::new("data.json#^block").unwrap_err();
+        assert!(matches!(err, VaultPathError::InvalidSubNotePath(_)));
+    }
+
+    #[test]
+    fn section_note_path() {
+        let section = VaultPath::new("folder/note.md#Goals/Q1").unwrap();
+        assert_eq!(
+            section.note_path(),
+            Some(VaultPath::new("folder/note.md").unwrap())
+        );
+
+        let note = VaultPath::new("folder/note.md").unwrap();
+        assert_eq!(note.note_path(), Some(note.clone()));
+
+        let folder = VaultPath::new("folder/").unwrap();
+        assert_eq!(folder.note_path(), None);
     }
 
     #[test]
@@ -329,6 +628,11 @@ mod tests {
             Some("json")
         );
         assert_eq!(VaultPath::new("folder/").unwrap().extension(), None);
+        // Section returns note's extension
+        assert_eq!(
+            VaultPath::new("note.md#Heading").unwrap().extension(),
+            Some("md")
+        );
     }
 
     #[test]
@@ -371,7 +675,6 @@ mod tests {
         let root = VaultPath::new("").unwrap();
         assert!(root.is_root());
         assert!(root.is_folder());
-        assert_eq!(root.kind(), PathKind::Folder);
         assert_eq!(root.as_str(), "");
     }
 
@@ -405,18 +708,36 @@ mod tests {
     }
 
     #[test]
-    fn parent_returns_folder() {
-        let path = VaultPath::new("projects/alpha/note.md").unwrap();
-        let parent = path.parent().unwrap();
-        assert!(parent.is_folder());
-        assert_eq!(parent.as_str(), "projects/alpha/");
+    fn parent_hierarchy() {
+        // Section -> Note
+        let section = VaultPath::new("folder/note.md#Goals/Q1").unwrap();
+        assert_eq!(
+            section.parent(),
+            Some(VaultPath::new("folder/note.md").unwrap())
+        );
 
+        // Note -> Folder
+        let note = VaultPath::new("folder/note.md").unwrap();
+        assert_eq!(note.parent(), Some(VaultPath::new("folder/").unwrap()));
+
+        // Note at root level -> None
         let root_file = VaultPath::new("note.md").unwrap();
         assert_eq!(root_file.parent(), None);
 
+        // Folder -> parent Folder
         let folder = VaultPath::new("projects/alpha/").unwrap();
-        let folder_parent = folder.parent().unwrap();
-        assert_eq!(folder_parent.as_str(), "projects/");
+        assert_eq!(folder.parent(), Some(VaultPath::new("projects/").unwrap()));
+
+        // Top-level Folder -> Root
+        let top_folder = VaultPath::new("projects/").unwrap();
+        assert_eq!(top_folder.parent(), Some(VaultPath::Root));
+
+        // Root -> None
+        assert_eq!(VaultPath::Root.parent(), None);
+
+        // Image -> Folder
+        let img = VaultPath::new("assets/logo.png").unwrap();
+        assert_eq!(img.parent(), Some(VaultPath::new("assets/").unwrap()));
     }
 
     #[test]
@@ -460,6 +781,16 @@ mod tests {
     }
 
     #[test]
+    fn section_is_under_folder() {
+        let section = VaultPath::new("projects/alpha/note.md#Goals").unwrap();
+        let projects = VaultPath::new("projects/").unwrap();
+        assert!(section.is_under_folder(&projects));
+
+        let other = VaultPath::new("other/").unwrap();
+        assert!(!section.is_under_folder(&other));
+    }
+
+    #[test]
     fn serde_roundtrip() {
         let path = VaultPath::new("projects/note.md").unwrap();
         let json = serde_json::to_string(&path).unwrap();
@@ -499,6 +830,17 @@ mod tests {
     }
 
     #[test]
+    fn serde_roundtrip_section() {
+        let section = VaultPath::new("note.md#Goals/Q1").unwrap();
+        let json = serde_json::to_string(&section).unwrap();
+        assert_eq!(json, "\"note.md#Goals/Q1\"");
+
+        let parsed: VaultPath = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, section);
+        assert!(parsed.is_section());
+    }
+
+    #[test]
     fn from_path_relative() {
         let root = Path::new("/vault");
         let path = Path::new("/vault/projects/note.md");
@@ -526,6 +868,10 @@ mod tests {
         let path = VaultPath::new("projects/note.md").unwrap();
         let pb = path.as_path_buf();
         assert_eq!(pb, PathBuf::from("projects/note.md"));
+
+        // Section returns note portion only
+        let section = VaultPath::new("projects/note.md#Goals").unwrap();
+        assert_eq!(section.as_path_buf(), PathBuf::from("projects/note.md"));
     }
 
     #[test]
@@ -576,6 +922,12 @@ mod tests {
 
         let nested = VaultPath::new("projects/alpha/").unwrap();
         assert_eq!(nested.stem(), "alpha");
+    }
+
+    #[test]
+    fn section_stem() {
+        let section = VaultPath::new("projects/note.md#Goals").unwrap();
+        assert_eq!(section.stem(), "note");
     }
 
     #[test]
