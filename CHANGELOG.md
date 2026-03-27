@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/AlKuz/tarn/compare/v0.5.1...v0.5.2) (2026-03-27)
+
+
+### Bug Fixes
+
+* vault path and integration tests ([#29](https://github.com/AlKuz/tarn/issues/29)) ([2539ef7](https://github.com/AlKuz/tarn/commit/2539ef7f11df618819f39774113c959da07cafcc))
+
 ## [0.5.1](https://github.com/AlKuz/tarn/compare/v0.5.0...v0.5.1) (2026-03-24)
 
 
