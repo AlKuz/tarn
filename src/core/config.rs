@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::common::Buildable;
 use crate::index::in_memory::InMemoryIndexError;
-use crate::index::{IndexBuildError, IndexConfig};
+use crate::index::{IndexBuildError, IndexConfig, default_persistence_path};
 use crate::storage::{LocalStorageConfig, StorageConfig};
 
 use super::tarn_core::TarnCore;
@@ -44,16 +44,22 @@ impl From<InMemoryIndexError> for BuildError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TarnConfig {
     pub storage: StorageConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<IndexConfig>,
+    pub index: IndexConfig,
 }
 
 impl TarnConfig {
     /// Create a config for a local vault at the given path.
+    ///
+    /// Creates a default in-memory index with auto-computed persistence path
+    /// based on the platform data directory.
     pub fn local(path: std::path::PathBuf) -> Self {
+        let persistence_path = default_persistence_path(&path);
         TarnConfig {
             storage: StorageConfig::Local(LocalStorageConfig { path }),
-            index: None,
+            index: IndexConfig::InMemory {
+                tokenizer: Default::default(),
+                persistence_path,
+            },
         }
     }
 
@@ -61,15 +67,22 @@ impl TarnConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let variables: HashMap<String, String> = std::env::vars().collect();
         let storage = Self::get_storage_config(&variables)?;
+        let vault_path = match &storage {
+            StorageConfig::Local(conf) => &conf.path,
+        };
+        let persistence_path = default_persistence_path(vault_path);
         Ok(TarnConfig {
             storage,
-            index: None,
+            index: IndexConfig::InMemory {
+                tokenizer: Default::default(),
+                persistence_path,
+            },
         })
     }
 
-    /// Add index configuration.
+    /// Override the index configuration.
     pub fn with_index(mut self, config: IndexConfig) -> Self {
-        self.index = Some(config);
+        self.index = config;
         self
     }
 
@@ -102,13 +115,7 @@ impl Buildable for TarnConfig {
             StorageConfig::Local(conf) => conf.path.clone(),
         };
 
-        let index = match &self.index {
-            Some(config) => {
-                let idx = config.build()?;
-                Some(Arc::new(idx))
-            }
-            None => None,
-        };
+        let index = Arc::new(self.index.build()?);
 
         Ok(TarnCore {
             storage,

@@ -29,7 +29,7 @@ pub fn copy_dir_all(src: &Path, dst: &Path) {
     }
 }
 
-pub async fn spawn_server(with_index: bool) -> (tempfile::TempDir, Client) {
+pub async fn spawn_server(_with_index: bool) -> (tempfile::TempDir, Client) {
     let tmp = tempfile::tempdir().unwrap();
     let vault = tmp.path().join("vault");
     copy_dir_all(&vault_source(), &vault);
@@ -40,9 +40,6 @@ pub async fn spawn_server(with_index: bool) -> (tempfile::TempDir, Client) {
                 .arg(&vault)
                 .arg("--log-level")
                 .arg("warn");
-            if with_index {
-                cmd.arg("--index");
-            }
         },
     ))
     .unwrap();

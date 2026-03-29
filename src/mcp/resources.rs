@@ -1,11 +1,17 @@
+use std::collections::HashMap;
+
 use rmcp::model::{
     AnnotateAble, ListResourceTemplatesResult, ListResourcesResult, RawResource,
     RawResourceTemplate, ReadResourceResult, ResourceContents,
 };
 
-use crate::common::VaultPath;
-
 use super::TarnMcpServer;
+use super::helpers::find_direct_children;
+use super::responses::{
+    FolderInfo, NoteResourceResponse, VaultFoldersResponse, VaultInfo, VaultTagInfo,
+    VaultTagsResponse,
+};
+use crate::common::VaultPath;
 
 fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
     folder
@@ -15,6 +21,20 @@ fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorDa
                 .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
         })
         .transpose()
+}
+
+fn internal_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(e.to_string(), None)
+}
+
+fn json_resource(
+    uri: &str,
+    value: &impl serde::Serialize,
+) -> Result<ReadResourceResult, rmcp::ErrorData> {
+    let json = serde_json::to_string_pretty(value).map_err(internal_err)?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(json, uri).with_mime_type("application/json"),
+    ]))
 }
 
 impl TarnMcpServer {
@@ -104,18 +124,28 @@ impl TarnMcpServer {
         folder: Option<&str>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
         let folder = parse_folder(folder)?;
-        let info = self
+
+        let paths = self
             .core
-            .vault_info(folder.as_ref())
+            .list(folder.as_ref(), true)
             .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
+        let tag_entries = self
+            .core
+            .tags(None, folder.as_ref())
+            .await
+            .map_err(internal_err)?;
 
-        let json = serde_json::to_string_pretty(&info)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let info = VaultInfo {
+            name: self.core.vault_name(),
+            root_path: self.core.vault_root().to_path_buf(),
+            folder,
+            note_count: paths.len(),
+            tag_count: tag_entries.len(),
+            storage_type: "local".to_string(),
+        };
 
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(json, uri).with_mime_type("application/json"),
-        ]))
+        json_resource(uri, &info)
     }
 
     async fn read_vault_tags(
@@ -124,18 +154,25 @@ impl TarnMcpServer {
         folder: Option<&str>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
         let folder = parse_folder(folder)?;
-        let tags = self
+
+        let entries = self
             .core
-            .vault_tags(folder.as_ref())
+            .tags(None, folder.as_ref())
             .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
 
-        let json = serde_json::to_string_pretty(&tags)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let all_tags: Vec<String> = entries.iter().map(|e| e.tag.clone()).collect();
+        let tags: Vec<VaultTagInfo> = entries
+            .into_iter()
+            .map(|e| VaultTagInfo {
+                children: find_direct_children(&e.tag, &all_tags),
+                tag: e.tag,
+                count: e.count,
+            })
+            .collect();
 
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(json, uri).with_mime_type("application/json"),
-        ]))
+        let response = VaultTagsResponse { folder, tags };
+        json_resource(uri, &response)
     }
 
     async fn read_vault_folders(
@@ -144,18 +181,28 @@ impl TarnMcpServer {
         folder: Option<&str>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
         let folder = parse_folder(folder)?;
-        let folders = self
+
+        let paths = self
             .core
-            .vault_folders(folder.as_ref())
+            .list(folder.as_ref(), true)
             .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
 
-        let json = serde_json::to_string_pretty(&folders)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let mut folder_counts: HashMap<VaultPath, usize> = HashMap::new();
+        for path in &paths {
+            if let Some(parent) = path.parent() {
+                *folder_counts.entry(parent).or_default() += 1;
+            }
+        }
 
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(json, uri).with_mime_type("application/json"),
-        ]))
+        let mut folders: Vec<FolderInfo> = folder_counts
+            .into_iter()
+            .map(|(path, note_count)| FolderInfo { path, note_count })
+            .collect();
+        folders.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let response = VaultFoldersResponse { folder, folders };
+        json_resource(uri, &response)
     }
 
     async fn read_note_resource(
@@ -163,17 +210,20 @@ impl TarnMcpServer {
         uri: &str,
         path: &str,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
-        let note = self
-            .core
-            .note_resource(path)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let (note, revision) = self.core.read(path).await.map_err(internal_err)?;
 
-        let json = serde_json::to_string_pretty(&note)
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+        let tags: Vec<String> = note.tags().into_iter().map(String::from).collect();
 
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(json, uri).with_mime_type("application/json"),
-        ]))
+        let response = NoteResourceResponse {
+            path: path.to_string(),
+            title: note.title.clone(),
+            revision,
+            frontmatter: note.frontmatter.clone(),
+            content: note.to_string(),
+            token_count: note.word_count(),
+            tags,
+        };
+
+        json_resource(uri, &response)
     }
 }

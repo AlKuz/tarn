@@ -8,8 +8,6 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::local::{LocalSessionManager, SessionConfig},
 };
-use tokio::task::JoinHandle;
-
 use tarn::TarnConfig;
 use tarn::common::Buildable;
 use tarn::index::IndexConfig;
@@ -92,11 +90,7 @@ struct Cli {
     #[arg(long, default_value = "info")]
     log_level: LogLevel,
 
-    /// Enable in-memory index for fast search
-    #[arg(long)]
-    index: bool,
-
-    /// Path for persistent index storage (implies --index)
+    /// Override the default index persistence path
     #[arg(long)]
     index_path: Option<PathBuf>,
 
@@ -114,40 +108,28 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(cli.log_level.as_filter())
         .init();
 
-    let use_index = cli.index || cli.index_path.is_some();
-
-    let (core, _index_sync_handle): (Arc<_>, Option<JoinHandle<()>>) = if use_index {
-        let index_config = IndexConfig::InMemory {
-            tokenizer: Default::default(),
-            persistence_path: cli.index_path,
-        };
-
-        let config = if let Some(vault) = cli.vault {
-            TarnConfig::local(vault)
-        } else {
-            TarnConfig::from_env()?
-        }
-        .with_index(index_config);
-
-        let core = Arc::new(config.build()?);
-
-        tracing::info!("rebuilding index...");
-        core.rebuild_index().await?;
-        tracing::info!("index rebuilt");
-
-        let handle = core.start_index_sync()?;
-        tracing::info!("index sync started");
-
-        (core, Some(handle))
+    let mut config = if let Some(vault) = cli.vault {
+        TarnConfig::local(vault)
     } else {
-        let config = if let Some(vault) = cli.vault {
-            TarnConfig::local(vault)
-        } else {
-            TarnConfig::from_env()?
-        };
-        let core = Arc::new(config.build()?);
-        (core, None)
+        TarnConfig::from_env()?
     };
+
+    // Override index persistence path if specified
+    if let Some(index_path) = cli.index_path {
+        config = config.with_index(IndexConfig::InMemory {
+            tokenizer: Default::default(),
+            persistence_path: Some(index_path),
+        });
+    }
+
+    let core = Arc::new(config.build()?);
+
+    tracing::info!("rebuilding index...");
+    core.rebuild_index().await?;
+    tracing::info!("index rebuilt");
+
+    let _index_sync_handle = core.start_index_sync();
+    tracing::info!("index sync started");
 
     match cli.transport {
         Transport::Stdio => {

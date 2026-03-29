@@ -44,8 +44,10 @@
 //! // Use with rmcp transport (stdio, HTTP, etc.)
 //! ```
 
+pub mod helpers;
 mod prompts;
 mod resources;
+pub mod responses;
 mod tools;
 
 use std::sync::Arc;

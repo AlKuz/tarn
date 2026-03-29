@@ -261,9 +261,17 @@ mod index_sync {
     use super::*;
     use tarn::TarnConfig;
     use tarn::common::Buildable;
+    use tarn::core::responses::SearchOptions;
 
     const WATCHER_SETTLE_MS: u64 = 100;
     const SYNC_WAIT_MS: u64 = 500;
+
+    fn search_opts(limit: usize) -> SearchOptions {
+        SearchOptions {
+            limit,
+            ..Default::default()
+        }
+    }
 
     #[tokio::test]
     async fn sync_indexes_new_file() {
@@ -277,7 +285,7 @@ mod index_sync {
             .build()
             .unwrap();
 
-        let _handle = core.start_index_sync().unwrap();
+        let _handle = core.start_index_sync();
 
         // Give watcher time to initialize
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
@@ -295,11 +303,11 @@ mod index_sync {
 
         // Verify index was updated via search
         let results = core
-            .search_notes("rust programming", None, None, 10, 0)
+            .search("rust programming", search_opts(10))
             .await
             .unwrap();
         assert_eq!(results.total, 1);
-        assert_eq!(results.results[0].path, "test.md");
+        assert_eq!(results.hits[0].path.to_string(), "test.md");
     }
 
     #[tokio::test]
@@ -325,13 +333,10 @@ mod index_sync {
         core.rebuild_index().await.unwrap();
 
         // Verify initial content is indexed
-        let results = core
-            .search_notes("apples", None, None, 10, 0)
-            .await
-            .unwrap();
+        let results = core.search("apples", search_opts(10)).await.unwrap();
         assert_eq!(results.total, 1);
 
-        let _handle = core.start_index_sync().unwrap();
+        let _handle = core.start_index_sync();
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Modify the file with different content
@@ -345,16 +350,10 @@ mod index_sync {
         tokio::time::sleep(Duration::from_millis(SYNC_WAIT_MS)).await;
 
         // Verify old content is gone, new content is indexed
-        let old_results = core
-            .search_notes("apples", None, None, 10, 0)
-            .await
-            .unwrap();
+        let old_results = core.search("apples", search_opts(10)).await.unwrap();
         assert_eq!(old_results.total, 0);
 
-        let new_results = core
-            .search_notes("oranges", None, None, 10, 0)
-            .await
-            .unwrap();
+        let new_results = core.search("oranges", search_opts(10)).await.unwrap();
         assert_eq!(new_results.total, 1);
     }
 
@@ -381,13 +380,10 @@ mod index_sync {
         core.rebuild_index().await.unwrap();
 
         // Verify file is indexed
-        let results = core
-            .search_notes("deleteme", None, None, 10, 0)
-            .await
-            .unwrap();
+        let results = core.search("deleteme", search_opts(10)).await.unwrap();
         assert_eq!(results.total, 1);
 
-        let _handle = core.start_index_sync().unwrap();
+        let _handle = core.start_index_sync();
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Delete the file
@@ -398,10 +394,7 @@ mod index_sync {
         tokio::time::sleep(Duration::from_millis(SYNC_WAIT_MS)).await;
 
         // Verify file is no longer in index
-        let results = core
-            .search_notes("deleteme", None, None, 10, 0)
-            .await
-            .unwrap();
+        let results = core.search("deleteme", search_opts(10)).await.unwrap();
         assert_eq!(results.total, 0);
     }
 
@@ -417,7 +410,7 @@ mod index_sync {
             .build()
             .unwrap();
 
-        let _handle = core.start_index_sync().unwrap();
+        let _handle = core.start_index_sync();
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Create non-markdown files
@@ -428,8 +421,8 @@ mod index_sync {
 
         tokio::time::sleep(Duration::from_millis(SYNC_WAIT_MS)).await;
 
-        // Verify vault info shows 0 notes
-        let info = core.vault_info(None).await.unwrap();
-        assert_eq!(info.note_count, 0);
+        // Verify no notes indexed
+        let paths = core.list(None, true).await.unwrap();
+        assert_eq!(paths.len(), 0);
     }
 }

@@ -64,7 +64,7 @@ async fn search_by_tag_filter() {
     let result = call_tool(
         &client,
         "tarn_search_notes",
-        json!({"query": "", "tag_filter": ["programming/web"], "limit": 50}),
+        json!({"query": "web", "tag_filter": ["programming/web"], "limit": 50}),
     )
     .await;
 
@@ -83,27 +83,31 @@ async fn search_by_tag_filter() {
 async fn search_pagination() {
     let (_tmp, client) = spawn_server(false).await;
 
+    // Use a broad query that matches many notes for pagination testing
     let all = call_tool(
         &client,
         "tarn_search_notes",
-        json!({"query": "", "limit": 100}),
+        json!({"query": "project", "limit": 100}),
     )
     .await;
+    let total = all["total"].as_u64().unwrap();
+    assert!(total >= 3, "need at least 3 results for pagination test");
+
     let page1 = call_tool(
         &client,
         "tarn_search_notes",
-        json!({"query": "", "limit": 2, "offset": 0}),
+        json!({"query": "project", "limit": 2, "offset": 0}),
     )
     .await;
     let page2 = call_tool(
         &client,
         "tarn_search_notes",
-        json!({"query": "", "limit": 2, "offset": 2}),
+        json!({"query": "project", "limit": 2, "offset": 2}),
     )
     .await;
 
-    assert_eq!(page1["total"], all["total"]);
-    assert_eq!(page2["total"], all["total"]);
+    assert_eq!(page1["total"].as_u64().unwrap(), total);
+    assert_eq!(page2["total"].as_u64().unwrap(), total);
     assert_eq!(page1["results"].as_array().unwrap().len(), 2);
 }
 

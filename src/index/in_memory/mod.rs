@@ -129,6 +129,11 @@ impl InMemoryIndex {
             serde_json::to_vec(&*inner)?
         };
 
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
         // Atomic write: temp file + rename
         let temp_path = path.with_extension("tmp");
         tokio::fs::write(&temp_path, &data).await?;

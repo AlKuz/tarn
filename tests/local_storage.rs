@@ -1030,10 +1030,11 @@ mod crlf_support {
         .unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
+        core.rebuild_index().await.unwrap();
 
-        // Test vault_tags returns correctly parsed tags
-        let tags_response = core.vault_tags(None).await.unwrap();
-        let tag_names: Vec<&str> = tags_response.tags.iter().map(|t| t.tag.as_str()).collect();
+        // Test tags returns correctly parsed tags
+        let tag_entries = core.tags(None, None).await.unwrap();
+        let tag_names: Vec<&str> = tag_entries.iter().map(|t| t.tag.as_str()).collect();
 
         assert!(tag_names.contains(&"programming/rust"));
         assert!(tag_names.contains(&"programming/python"));
@@ -1051,14 +1052,21 @@ mod crlf_support {
         .unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
+        core.rebuild_index().await.unwrap();
 
         let results = core
-            .search_notes("unique_term_123", None, None, 10, 0)
+            .search(
+                "unique_term_123",
+                tarn::core::responses::SearchOptions {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
         assert_eq!(results.total, 1);
-        assert_eq!(results.results[0].title, Some("Searchable".to_string()));
+        assert_eq!(results.hits[0].path.to_string(), "searchable.md");
     }
 }
 

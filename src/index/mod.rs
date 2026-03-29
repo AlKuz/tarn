@@ -6,7 +6,7 @@
 pub mod config;
 pub mod in_memory;
 
-pub use config::{IndexBuildError, IndexConfig};
+pub use config::{IndexBuildError, IndexConfig, default_persistence_path};
 pub use in_memory::InMemoryIndex;
 
 use serde::{Deserialize, Serialize};
