@@ -242,6 +242,119 @@ async fn unknown_uri_returns_error() {
 }
 
 // =============================================================================
+// Section Resource
+// =============================================================================
+
+#[tokio::test]
+async fn section_resource_reads_content() {
+    let (_tmp, client) = spawn_server(false).await;
+
+    let section =
+        read_resource(&client, "tarn://note/wiki/Rust.md#Rust/Ownership").await;
+
+    assert_eq!(section["note_path"], "wiki/Rust.md");
+    assert_eq!(
+        section["heading_path"],
+        Value::Array(vec![
+            Value::String("Rust".into()),
+            Value::String("Ownership".into()),
+        ])
+    );
+    assert!(
+        section["content"]
+            .as_str()
+            .unwrap()
+            .contains("Every value has exactly one owner")
+    );
+    assert!(section["token_count"].as_u64().unwrap() > 0);
+    assert!(!section["revision"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn section_resource_nested_heading() {
+    let (_tmp, client) = spawn_server(false).await;
+
+    let section =
+        read_resource(&client, "tarn://note/wiki/Rust.md#Rust/Ownership/Borrowing").await;
+
+    assert_eq!(section["note_path"], "wiki/Rust.md");
+    assert_eq!(
+        section["heading_path"],
+        Value::Array(vec![
+            Value::String("Rust".into()),
+            Value::String("Ownership".into()),
+            Value::String("Borrowing".into()),
+        ])
+    );
+    assert!(
+        section["content"]
+            .as_str()
+            .unwrap()
+            .contains("References allow borrowing")
+    );
+}
+
+#[tokio::test]
+async fn section_resource_includes_tags() {
+    let (_tmp, client) = spawn_server(false).await;
+
+    let section =
+        read_resource(&client, "tarn://note/wiki/Rust.md#Rust/Resources").await;
+
+    let tags: Vec<&str> = section["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    // Frontmatter tags should be present
+    assert!(tags.contains(&"programming/rust"));
+}
+
+#[tokio::test]
+async fn section_resource_includes_links() {
+    let (_tmp, client) = spawn_server(false).await;
+
+    let section =
+        read_resource(&client, "tarn://note/wiki/Rust.md#Rust/Resources").await;
+
+    let links = section["links"].as_array().unwrap();
+    assert!(!links.is_empty());
+    let link_types: Vec<&str> = links
+        .iter()
+        .map(|l| l["link_type"].as_str().unwrap())
+        .collect();
+    assert!(link_types.contains(&"markdown"));
+}
+
+#[tokio::test]
+async fn section_resource_not_found_lists_available() {
+    let (_tmp, client) = spawn_server(false).await;
+
+    let result = client
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            "tarn://note/wiki/Rust.md#NonExistent",
+        ))
+        .await;
+
+    assert!(result.is_err());
+    let err = format!("{:?}", result.unwrap_err());
+    assert!(err.contains("section not found"));
+    assert!(err.contains("Ownership"));
+}
+
+#[tokio::test]
+async fn section_resource_path_field_includes_fragment() {
+    let (_tmp, client) = spawn_server(false).await;
+
+    let section =
+        read_resource(&client, "tarn://note/wiki/Rust.md#Rust/Lifetimes").await;
+
+    assert_eq!(section["path"], "wiki/Rust.md#Rust/Lifetimes");
+    assert_eq!(section["note_path"], "wiki/Rust.md");
+}
+
+// =============================================================================
 // List Resources & Templates
 // =============================================================================
 
@@ -266,4 +379,5 @@ async fn lists_resource_templates() {
 
     assert!(uris.contains(&"tarn://vault/info/{folder}"));
     assert!(uris.contains(&"tarn://note/{path}"));
+    assert!(uris.contains(&"tarn://note/{path}#{section_path}"));
 }

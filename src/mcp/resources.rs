@@ -8,9 +8,10 @@ use rmcp::model::{
 use super::TarnMcpServer;
 use super::helpers::find_direct_children;
 use super::responses::{
-    FolderInfo, NoteResourceResponse, VaultFoldersResponse, VaultInfo, VaultTagInfo,
-    VaultTagsResponse,
+    FolderInfo, LinkInfo, NoteResourceResponse, SectionResourceResponse, VaultFoldersResponse,
+    VaultInfo, VaultTagInfo, VaultTagsResponse,
 };
+use crate::TarnCore;
 use crate::common::VaultPath;
 
 fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
@@ -78,6 +79,10 @@ impl TarnMcpServer {
                     .with_description("Individual note content and metadata")
                     .with_mime_type("application/json")
                     .no_annotation(),
+                RawResourceTemplate::new("tarn://note/{path}#{section_path}", "Note Section")
+                    .with_description("Section content by heading path (e.g. Architecture/Backend)")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
             ],
             next_cursor: None,
             meta: None,
@@ -108,6 +113,11 @@ impl TarnMcpServer {
                 return self.read_vault_folders(uri, Some(folder)).await;
             }
             if let Some(path) = rest.strip_prefix("note/") {
+                if let Some((note_path, section_path)) = path.split_once('#') {
+                    return self
+                        .read_section_resource(uri, note_path, section_path)
+                        .await;
+                }
                 return self.read_note_resource(uri, path).await;
             }
         }
@@ -203,6 +213,64 @@ impl TarnMcpServer {
 
         let response = VaultFoldersResponse { folder, folders };
         json_resource(uri, &response)
+    }
+
+    async fn read_section_resource(
+        &self,
+        uri: &str,
+        note_path: &str,
+        section_path: &str,
+    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+        let (note, revision) = self.core.read(note_path).await.map_err(internal_err)?;
+
+        let heading_path: Vec<&str> = section_path.split('/').collect();
+        let section = TarnCore::resolve_section(&note, &heading_path);
+
+        match section {
+            Some(section) => {
+                // Combine frontmatter tags with section inline tags
+                let mut tags: Vec<String> = note
+                    .frontmatter
+                    .as_ref()
+                    .map(|fm| fm.tags.clone())
+                    .unwrap_or_default();
+                tags.extend(section.tags.iter().map(|t| t.name().to_string()));
+                tags.sort();
+                tags.dedup();
+
+                let links: Vec<LinkInfo> = section.links.iter().map(LinkInfo::from).collect();
+
+                let response = SectionResourceResponse {
+                    path: format!("{}#{}", note_path, section_path),
+                    note_path: note_path.to_string(),
+                    heading_path: section.heading_path.clone(),
+                    revision,
+                    content: section.content.clone(),
+                    tags,
+                    links,
+                    token_count: section.word_count(),
+                };
+
+                json_resource(uri, &response)
+            }
+            None => {
+                let available: Vec<String> = note
+                    .sections
+                    .iter()
+                    .filter(|s| !s.heading_path.is_empty())
+                    .map(|s| s.heading_path.join("/"))
+                    .collect();
+
+                Err(rmcp::ErrorData::resource_not_found(
+                    format!(
+                        "section not found: '{}'. Available sections: [{}]",
+                        section_path,
+                        available.join(", ")
+                    ),
+                    None,
+                ))
+            }
+        }
     }
 
     async fn read_note_resource(
