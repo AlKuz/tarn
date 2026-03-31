@@ -1,15 +1,18 @@
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::core::config::TarnConfig;
 use crate::core::responses::{CoreSearchResponse, SearchHit, SearchOptions, TagEntry};
-use crate::index::{InMemoryIndex, Index, IndexError, IndexLink, SearchParams};
+use crate::index::find_direct_children;
+use crate::index::{Index, IndexError, IndexLink, SearchParams};
 use crate::note_handler::{Note, Section};
-use crate::observer::{LocalStorageObserver, Observer, ObserverError, StorageEvent};
+use crate::observer::{Observer, ObserverError, StorageEvent};
 use crate::storage::{FileContent, Storage, StorageError};
 
 #[derive(Debug, Error)]
@@ -28,64 +31,50 @@ pub enum CoreError {
     InvalidRegex(#[from] regex::Error),
 }
 
-pub struct TarnCore {
-    pub(crate) storage: crate::storage::local::LocalStorage,
-    pub(crate) vault_path: std::path::PathBuf,
-    pub(crate) index: std::sync::Arc<InMemoryIndex>,
+pub struct TarnCore<S, I, O> {
+    storage: Arc<S>,
+    vault_name: String,
+    index: Arc<I>,
+    observer: Arc<O>,
 }
 
-impl Configurable for TarnCore {
-    type Config = TarnConfig;
+impl<S, I, O> TarnCore<S, I, O> {
+    pub fn new(storage: Arc<S>, vault_name: String, index: Arc<I>, observer: Arc<O>) -> Self {
+        Self {
+            storage,
+            vault_name,
+            index,
+            observer,
+        }
+    }
+}
+
+impl<S, I, O> Configurable for TarnCore<S, I, O>
+where
+    S: Storage + Configurable + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Configurable + Send + Sync + 'static,
+    S::Config: Serialize + DeserializeOwned,
+    O::Config: Serialize + DeserializeOwned,
+{
+    type Config = TarnConfig<S::Config, <I as Configurable>::Config, O::Config>;
 
     fn config(&self) -> Self::Config {
         TarnConfig {
+            vault_name: self.vault_name.clone(),
             storage: self.storage.config(),
             index: self.index.config(),
+            observer: self.observer.config(),
         }
     }
 }
 
-// --- Helper functions ---
-
-fn is_in_folder(path: &VaultPath, folder: Option<&VaultPath>) -> bool {
-    match folder {
-        None => true,
-        Some(f) => path.is_under_folder(f),
-    }
-}
-
-fn find_direct_children(parent: &str, all_tags: &[String]) -> Vec<String> {
-    all_tags
-        .iter()
-        .filter(|other| {
-            other.starts_with(parent)
-                && other.len() > parent.len()
-                && other.as_bytes().get(parent.len()) == Some(&b'/')
-                && !other[parent.len() + 1..].contains('/')
-        })
-        .cloned()
-        .collect()
-}
-
-// --- TarnCore implementation ---
-
-impl TarnCore {
-    async fn collect_md_files(
-        &self,
-        folder: Option<&VaultPath>,
-    ) -> Result<Vec<VaultPath>, CoreError> {
-        let stream = self.storage.list().await?;
-        tokio::pin!(stream);
-
-        let mut files = Vec::new();
-        while let Some(meta) = stream.next().await {
-            if meta.path.is_note() && is_in_folder(&meta.path, folder) {
-                files.push(meta.path);
-            }
-        }
-        Ok(files)
-    }
-
+impl<S, I, O> TarnCore<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     async fn read_and_parse(&self, path: &VaultPath) -> Result<(Note, RevisionToken), CoreError> {
         let file = self.storage.read(path).await?;
         match file.content {
@@ -104,10 +93,15 @@ impl TarnCore {
     /// No-op if index is not configured.
     pub async fn rebuild_index(&self) -> Result<(), CoreError> {
         let index = &self.index;
-
         index.clear().await?;
 
-        let files = self.collect_md_files(None).await?;
+        let stream = self.storage.list(&VaultPath::Root).await?;
+        tokio::pin!(stream);
+        let files = stream
+            .filter(|meta| meta.path.is_note())
+            .map(|meta| meta.path)
+            .collect::<Vec<_>>()
+            .await;
         let mut notes = Vec::new();
 
         for file_path in &files {
@@ -127,26 +121,12 @@ impl TarnCore {
     ///
     /// Spawns a task that watches for file changes and updates the index.
     /// Returns a handle to the background task.
-    ///
-    /// Start background index synchronization.
-    ///
-    /// Spawns a task that watches for file changes and updates the index.
-    /// Returns a handle to the background task.
     pub fn start_index_sync(&self) -> JoinHandle<()> {
         let index = self.index.clone();
-
-        let vault_path = self.vault_path.clone();
+        let storage = self.storage.clone();
+        let observer = self.observer.clone();
 
         tokio::spawn(async move {
-            let observer = LocalStorageObserver::new(vault_path.clone());
-            let storage = match crate::storage::local::LocalStorage::new(vault_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(error = %e, "failed to initialize storage for index sync");
-                    return;
-                }
-            };
-
             let stream = match observer.observe().await {
                 Ok(s) => s,
                 Err(e) => {
@@ -170,7 +150,7 @@ impl TarnCore {
                                     note.path = Some(path.clone());
 
                                     if let Err(e) = index.update(&note).await {
-                                        warn!(path = %path, error = %e, "failed to update index");
+                                        debug!(path = %path, error = %e, "failed to update index (likely shutting down)");
                                     } else {
                                         info!(path = %path, "indexed note");
                                     }
@@ -180,7 +160,7 @@ impl TarnCore {
                                 }
                             },
                             Err(e) => {
-                                warn!(path = %path, error = %e, "failed to read note for indexing");
+                                debug!(path = %path, error = %e, "failed to read note for indexing (likely shutting down)");
                             }
                         }
                     }
@@ -190,7 +170,7 @@ impl TarnCore {
                         }
 
                         if let Err(e) = index.remove(&path).await {
-                            warn!(path = %path, error = %e, "failed to remove from index");
+                            debug!(path = %path, error = %e, "failed to remove from index (likely shutting down)");
                         } else {
                             info!(path = %path, "removed note from index");
                         }
@@ -199,12 +179,6 @@ impl TarnCore {
             }
         })
     }
-
-    // =========================================================================
-    // New low-level primitives
-    // =========================================================================
-
-    // --- Storage operations ---
 
     /// Read a note's parsed content and revision token.
     pub async fn read(&self, path: &str) -> Result<(Note, RevisionToken), CoreError> {
@@ -285,29 +259,6 @@ impl TarnCore {
         }
     }
 
-    // --- Note parsing (stateless) ---
-
-    /// Parse markdown content into a Note. Stateless.
-    pub fn parse(content: &str) -> Note {
-        Note::from(content)
-    }
-
-    /// Find a section within a note by heading path.
-    ///
-    /// The heading path is matched hierarchically. For example,
-    /// `["Goals", "Q1"]` matches a `## Q1` section under `# Goals`.
-    pub fn resolve_section<'a>(note: &'a Note, heading_path: &[&str]) -> Option<&'a Section> {
-        note.sections.iter().find(|s| {
-            s.heading_path.len() == heading_path.len()
-                && s.heading_path
-                    .iter()
-                    .zip(heading_path.iter())
-                    .all(|(a, b)| a == b)
-        })
-    }
-
-    // --- Index queries ---
-
     /// Search for notes matching a query. Returns deduplicated hits with scores.
     ///
     /// Returns empty results when query is empty — use `list()` for listing.
@@ -323,31 +274,42 @@ impl TarnCore {
             });
         }
 
-        // Request a generous limit from the index since sections deduplicate to
-        // fewer notes. We need enough sections to fill limit+offset unique notes.
-        // Use 4x multiplier as a heuristic (notes typically have ~4 sections).
-        let index_limit = (options.limit + options.offset) * 4;
-        let params = SearchParams {
-            folder: options.folder,
-            tags: options.tags,
-            limit: index_limit,
-            offset: 0,
-        };
+        // Fetch sections from the index with adaptive sizing. Sections
+        // deduplicate to fewer notes, so we start at 4x and double until we
+        // have enough unique notes or the index is exhausted.
+        let target = options.limit + options.offset;
+        let mut multiplier = 4;
+        let mut note_hits: HashMap<VaultPath, (f32, Vec<Vec<String>>)>;
 
-        let search_results = self.index.search(query, params).await?;
+        loop {
+            let index_limit = target * multiplier;
+            let params = SearchParams {
+                folder: options.folder.clone(),
+                tags: options.tags.clone(),
+                limit: index_limit,
+                offset: 0,
+            };
 
-        // Deduplicate by note path, collect matching sections per note
-        let mut note_hits: HashMap<VaultPath, (f32, Vec<Vec<String>>)> = HashMap::new();
+            let search_results = self.index.search(query, params).await?;
+            let result_count = search_results.len();
 
-        for (section, score) in search_results {
-            let entry = note_hits
-                .entry(section.note_path.clone())
-                .or_insert_with(|| (0.0, Vec::new()));
-            // Use max score across sections
-            if score > entry.0 {
-                entry.0 = score;
+            // Deduplicate by note path, collect matching sections per note
+            note_hits = HashMap::new();
+            for (section, score) in search_results {
+                let entry = note_hits
+                    .entry(section.note_path.clone())
+                    .or_insert_with(|| (0.0, Vec::new()));
+                if score > entry.0 {
+                    entry.0 = score;
+                }
+                entry.1.push(section.heading_path);
             }
-            entry.1.push(section.heading_path);
+
+            // Enough unique notes, or index exhausted
+            if note_hits.len() >= target || result_count < index_limit {
+                break;
+            }
+            multiplier *= 2;
         }
 
         let mut hits: Vec<SearchHit> = note_hits
@@ -435,24 +397,34 @@ impl TarnCore {
         Ok(links)
     }
 
-    // --- Accessors ---
+    /// Get the vault name.
+    pub fn vault_name(&self) -> &str {
+        &self.vault_name
+    }
+}
 
-    /// Get the vault name (directory name of vault path).
-    pub fn vault_name(&self) -> String {
-        self.vault_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "vault".to_string())
+// Static methods that don't depend on generic parameters
+impl<S, I, O> TarnCore<S, I, O> {
+    // --- Note parsing (stateless) ---
+
+    /// Parse markdown content into a Note. Stateless.
+    pub fn parse(content: &str) -> Note {
+        Note::from(content)
     }
 
-    /// Get the vault root path.
-    pub fn vault_root(&self) -> &std::path::Path {
-        &self.vault_path
+    /// Find a section within a note by heading path.
+    ///
+    /// The heading path is matched hierarchically. For example,
+    /// `["Goals", "Q1"]` matches a `## Q1` section under `# Goals`.
+    pub fn resolve_section<'a>(note: &'a Note, heading_path: &[&str]) -> Option<&'a Section> {
+        note.sections.iter().find(|s| {
+            s.heading_path.len() == heading_path.len()
+                && s.heading_path
+                    .iter()
+                    .zip(heading_path.iter())
+                    .all(|(a, b)| a == b)
+        })
     }
-
-    // =========================================================================
-    // Private helpers
-    // =========================================================================
 
     fn validate_note_path(path: &str) -> Result<VaultPath, CoreError> {
         let vault_path: VaultPath = path.try_into().map_err(StorageError::from)?;
@@ -470,7 +442,13 @@ mod tests {
     use crate::core::config::TarnConfig;
     use tempfile::TempDir;
 
-    fn setup() -> (TempDir, TarnCore) {
+    type TestCore = TarnCore<
+        crate::storage::local::LocalStorage,
+        crate::index::InMemoryIndex,
+        crate::observer::LocalStorageObserver,
+    >;
+
+    fn setup() -> (TempDir, TestCore) {
         let dir = TempDir::new().unwrap();
         let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
         (dir, core)
@@ -543,15 +521,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_and_resolve_section() {
-        let note = TarnCore::parse("# Top\n\ncontent\n\n## Sub\n\nsub content");
+        let note = TestCore::parse("# Top\n\ncontent\n\n## Sub\n\nsub content");
         assert_eq!(note.title, Some("Top".to_string()));
         assert_eq!(note.sections.len(), 2);
 
-        let section = TarnCore::resolve_section(&note, &["Top", "Sub"]);
+        let section = TestCore::resolve_section(&note, &["Top", "Sub"]);
         assert!(section.is_some());
         assert!(section.unwrap().content.contains("sub content"));
 
-        let missing = TarnCore::resolve_section(&note, &["Nonexistent"]);
+        let missing = TestCore::resolve_section(&note, &["Nonexistent"]);
         assert!(missing.is_none());
     }
 
@@ -626,9 +604,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vault_name_and_root() {
+    async fn test_vault_name() {
         let (_dir, core) = setup();
         assert!(!core.vault_name().is_empty());
-        assert!(core.vault_root().exists());
     }
 }

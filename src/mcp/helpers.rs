@@ -3,42 +3,15 @@ use std::collections::{HashMap, HashSet};
 use crate::common::VaultPath;
 use crate::index::SectionEntry;
 
-/// Extract a snippet with context around the first match of `query` in `content`.
-pub fn extract_snippet(content: &str, query: &str, context_chars: usize) -> String {
-    let lower_content = content.to_lowercase();
-    let lower_query = query.to_lowercase();
-
-    if let Some(pos) = lower_content.find(&lower_query) {
-        let start = content[..pos]
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(pos.saturating_sub(context_chars));
-        let end_pos = pos + query.len();
-        let end = content[end_pos..]
-            .find(char::is_whitespace)
-            .map(|i| end_pos + i)
-            .unwrap_or((end_pos + context_chars).min(content.len()));
-
-        let prefix = if start > 0 { "..." } else { "" };
-        let suffix = if end < content.len() { "..." } else { "" };
-        format!("{prefix}{}{suffix}", &content[start..end])
-    } else {
-        content.chars().take(100).collect::<String>()
-    }
-}
-
-/// Find direct children of a parent tag in a tag hierarchy.
-pub fn find_direct_children(parent: &str, all_tags: &[String]) -> Vec<String> {
-    all_tags
-        .iter()
-        .filter(|other| {
-            other.starts_with(parent)
-                && other.len() > parent.len()
-                && other.as_bytes().get(parent.len()) == Some(&b'/')
-                && !other[parent.len() + 1..].contains('/')
+/// Parse an optional folder string into a validated `VaultPath`.
+pub fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
+    folder
+        .map(|f| {
+            let normalized = format!("{}/", f.trim_end_matches('/'));
+            VaultPath::new(normalized)
+                .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
         })
-        .cloned()
-        .collect()
+        .transpose()
 }
 
 /// Helper for aggregating section data into note-level data.

@@ -68,6 +68,11 @@ impl IndexData {
             bm25_index: BM25Index::new(),
         }
     }
+
+    /// Check if a note has any sections in the index.
+    fn has_note(&self, note_path: &VaultPath) -> bool {
+        self.sections.values().any(|e| &e.note_path == note_path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +115,6 @@ impl InMemoryIndex {
             }
             _ => IndexData::new(tokenizer_config),
         };
-
         Ok(Self {
             data: RwLock::new(inner),
             tokenizer,
@@ -143,19 +147,25 @@ impl InMemoryIndex {
     }
 
     /// Build a section VaultPath from a note path and heading path.
-    fn make_section_path(note_path: &VaultPath, heading_path: &[String]) -> VaultPath {
+    fn make_section_path(
+        note_path: &VaultPath,
+        heading_path: &[String],
+    ) -> Result<VaultPath, IndexError> {
         let section_path_str = heading_path.join("/");
-        VaultPath::new(format!("{}#{}", note_path.as_str(), section_path_str))
-            .expect("valid section path from note path and headings")
+        VaultPath::new(format!("{}#{}", note_path.as_str(), section_path_str)).map_err(|e| {
+            IndexError::Backend(format!("invalid section path for {}: {}", note_path, e))
+        })
     }
 
-    /// Index a note, extracting all sections.
+    /// Index a note, extracting all sections. Increments note_count if new.
     fn index_note(
         inner: &mut IndexData,
         tokenizer: &dyn Tokenizer,
         note: &Note,
         note_path: &VaultPath,
     ) {
+        let is_new = !inner.has_note(note_path);
+
         // Get frontmatter tags (attached to all sections)
         let frontmatter_tags: Vec<String> = note
             .frontmatter
@@ -164,7 +174,13 @@ impl InMemoryIndex {
             .unwrap_or_default();
 
         for section in &note.sections {
-            let section_path = Self::make_section_path(note_path, &section.heading_path);
+            let section_path = match Self::make_section_path(note_path, &section.heading_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(note = %note_path, error = %e, "skipping section with invalid path");
+                    continue;
+                }
+            };
 
             // Combine frontmatter tags with inline tags
             let mut all_tags: Vec<String> = frontmatter_tags.clone();
@@ -192,11 +208,14 @@ impl InMemoryIndex {
             // Store section entry
             inner.sections.insert(section_path, entry);
         }
+
+        if is_new {
+            inner.meta.note_count += 1;
+        }
     }
 
-    /// Remove all sections for a note path.
+    /// Remove all sections for a note path. Decrements note_count if removed.
     fn remove_note_sections(inner: &mut IndexData, note_path: &VaultPath) {
-        // Find all section paths for this note
         let section_paths: Vec<VaultPath> = inner
             .sections
             .keys()
@@ -204,10 +223,13 @@ impl InMemoryIndex {
             .cloned()
             .collect();
 
-        for section_path in section_paths {
-            inner.sections.remove(&section_path);
-            inner.tag_index.remove(&section_path);
-            inner.bm25_index.remove_document(&section_path);
+        if !section_paths.is_empty() {
+            for section_path in section_paths {
+                inner.sections.remove(&section_path);
+                inner.tag_index.remove(&section_path);
+                inner.bm25_index.remove_document(&section_path);
+            }
+            inner.meta.note_count = inner.meta.note_count.saturating_sub(1);
         }
     }
 }
@@ -255,13 +277,6 @@ impl Index for InMemoryIndex {
             // Index the note
             Self::index_note(&mut inner, &*self.tokenizer, note, note_path);
 
-            // Update metadata
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
             inner.meta.last_indexed = Some(chrono::Utc::now());
         }
 
@@ -272,14 +287,6 @@ impl Index for InMemoryIndex {
         {
             let mut inner = self.data.write().await;
             Self::remove_note_sections(&mut inner, path);
-
-            // Update note count
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
         }
 
         self.persist().await.map_err(Into::into)
@@ -302,7 +309,7 @@ impl Index for InMemoryIndex {
         let bm25_results = inner.bm25_index.search(&query_tokens, bm25_limit);
 
         // Filter results
-        let mut results: Vec<(SectionEntry, f32)> = bm25_results
+        let results: Vec<(SectionEntry, f32)> = bm25_results
             .into_iter()
             .filter_map(|(section_path, score)| {
                 let entry = inner.sections.get(&section_path)?;
@@ -327,9 +334,6 @@ impl Index for InMemoryIndex {
             .skip(params.offset)
             .take(params.limit)
             .collect();
-
-        // Already sorted by BM25 score descending
-        results.truncate(params.limit);
 
         Ok(results)
     }
@@ -430,13 +434,6 @@ impl Index for InMemoryIndex {
                 Self::index_note(&mut inner, &*self.tokenizer, note, note_path);
             }
 
-            // Update metadata
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
             inner.meta.last_indexed = Some(chrono::Utc::now());
         }
 
@@ -450,14 +447,6 @@ impl Index for InMemoryIndex {
             for path in paths {
                 Self::remove_note_sections(&mut inner, path);
             }
-
-            // Update note count
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
         }
 
         self.persist().await.map_err(Into::into)
@@ -513,18 +502,19 @@ mod tests {
         let path = VaultPath::new("projects/alpha.md").unwrap();
 
         // Root section
-        let sp = InMemoryIndex::make_section_path(&path, &[]);
+        let sp = InMemoryIndex::make_section_path(&path, &[]).unwrap();
         assert_eq!(sp.as_str(), "projects/alpha.md#");
         assert_eq!(sp.note_path(), Some(path.clone()));
         assert!(sp.section_headings().is_empty());
 
         // Single heading
-        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string()]);
+        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string()]).unwrap();
         assert_eq!(sp.as_str(), "projects/alpha.md#Goals");
         assert_eq!(sp.section_headings(), vec!["Goals"]);
 
         // Nested headings
-        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string(), "Q1".to_string()]);
+        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string(), "Q1".to_string()])
+            .unwrap();
         assert_eq!(sp.as_str(), "projects/alpha.md#Goals/Q1");
         assert_eq!(sp.section_headings(), vec!["Goals", "Q1"]);
     }

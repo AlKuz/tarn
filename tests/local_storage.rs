@@ -387,7 +387,7 @@ mod listing {
     async fn list_empty_directory() {
         let (_dir, storage) = create_temp_storage();
 
-        let stream = storage.list().await.unwrap();
+        let stream = storage.list(&tarn::common::VaultPath::Root).await.unwrap();
         let stream = pin!(stream);
         let files: Vec<_> = stream.collect().await;
 
@@ -405,7 +405,7 @@ mod listing {
             .await
             .unwrap();
 
-        let stream = storage.list().await.unwrap();
+        let stream = storage.list(&tarn::common::VaultPath::Root).await.unwrap();
         let stream = pin!(stream);
         let mut files: Vec<_> = stream.map(|m| m.path).collect().await;
         files.sort();
@@ -423,7 +423,7 @@ mod listing {
         fs::create_dir_all(dir.path().join("subdir")).await.unwrap();
         fs::write(dir.path().join("file.md"), "").await.unwrap();
 
-        let stream = storage.list().await.unwrap();
+        let stream = storage.list(&tarn::common::VaultPath::Root).await.unwrap();
         let stream = pin!(stream);
         let files: Vec<_> = stream.map(|m| m.path).collect().await;
 

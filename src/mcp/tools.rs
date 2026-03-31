@@ -1,22 +1,15 @@
-use regex::Regex;
+use regex::RegexBuilder;
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use schemars::JsonSchema;
 
 use super::TarnMcpServer;
-use super::helpers::extract_snippet;
+use super::helpers::parse_folder;
 use super::responses::{SearchResponse, SearchResult, WriteNoteResponse};
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::RevisionToken;
 use crate::core::responses::{ReplaceMode, SearchOptions};
-
-fn parse_folder(folder: Option<String>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
-    folder
-        .map(|f| {
-            let normalized = format!("{}/", f.trim_end_matches('/'));
-            VaultPath::new(normalized)
-                .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
-        })
-        .transpose()
-}
+use crate::index::Index;
+use crate::observer::Observer;
+use crate::storage::Storage;
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct SearchNotesParams {
@@ -87,15 +80,20 @@ fn tool_error(e: impl std::fmt::Display) -> Result<CallToolResult, rmcp::ErrorDa
 }
 
 #[tool_router(vis = "pub(crate)")]
-impl TarnMcpServer {
+impl<S, I, O> TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     #[tool(
-        description = "Search across the vault using case-insensitive text matching. Returns matching notes with snippets showing context around matches."
+        description = "Search across the vault using full-text matching. Returns matching notes with metadata."
     )]
     async fn tarn_search_notes(
         &self,
         Parameters(params): Parameters<SearchNotesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let folder = parse_folder(params.folder)?;
+        let folder = parse_folder(params.folder.as_deref())?;
         let limit = params.limit.unwrap_or(20);
         let offset = params.offset.unwrap_or(0);
 
@@ -113,17 +111,11 @@ impl TarnMcpServer {
                     let path_str = hit.path.to_string();
                     match self.core.read(&path_str).await {
                         Ok((note, _)) => {
-                            let snippet = if params.query.is_empty() {
-                                String::new()
-                            } else {
-                                extract_snippet(&note.to_string(), &params.query, 50)
-                            };
                             let tags: Vec<String> =
                                 note.tags().into_iter().map(String::from).collect();
                             results.push(SearchResult {
                                 path: path_str,
                                 title: note.title.clone(),
-                                snippet,
                                 tags,
                             });
                         }
@@ -176,15 +168,6 @@ impl TarnMcpServer {
         &self,
         Parameters(params): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // Check if note already exists
-        match self.core.exists(&params.path).await {
-            Ok(Some(_)) => {
-                return tool_error(format!("file {} already exists", params.path));
-            }
-            Err(e) => return tool_error(e),
-            Ok(None) => {}
-        }
-
         match self.core.write(&params.path, &params.content, None).await {
             Ok(revision) => {
                 let response = WriteNoteResponse {
@@ -242,34 +225,28 @@ impl TarnMcpServer {
         let revision: RevisionToken = params.revision.into();
 
         // Read current content
-        let (note, current_rev) = match self.core.read(&params.path).await {
+        let (note, _) = match self.core.read(&params.path).await {
             Ok(result) => result,
             Err(e) => return tool_error(e),
         };
-
-        // Check revision
-        if current_rev != revision {
-            return tool_error(format!(
-                "write conflict: {} (expected: {}, actual: {})",
-                params.path, revision, current_rev
-            ));
-        }
 
         // Apply replacement
         let current_content = note.to_string();
         let new_content = match mode {
             ReplaceMode::First => current_content.replacen(&params.old, &params.new, 1),
             ReplaceMode::All => current_content.replace(&params.old, &params.new),
-            ReplaceMode::Regex => match Regex::new(&params.old) {
-                Ok(re) => re.replace_all(&current_content, &*params.new).into_owned(),
-                Err(e) => return tool_error(format!("invalid regex: {e}")),
-            },
+            ReplaceMode::Regex => {
+                match RegexBuilder::new(&params.old).size_limit(1_000_000).build() {
+                    Ok(re) => re.replace_all(&current_content, &*params.new).into_owned(),
+                    Err(e) => return tool_error(format!("invalid regex: {e}")),
+                }
+            }
         };
 
-        // Write back
+        // Write back with user's revision for conflict detection
         match self
             .core
-            .write(&params.path, &new_content, Some(current_rev))
+            .write(&params.path, &new_content, Some(revision))
             .await
         {
             Ok(new_revision) => {

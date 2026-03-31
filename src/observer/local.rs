@@ -5,7 +5,7 @@ use futures_core::stream::Stream;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::fs;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::debug;
 
 use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::observer::config::ObserverConfig;
@@ -46,7 +46,7 @@ async fn try_revision_token(root: &Path, path: &VaultPath) -> Option<RevisionTok
             Some(format!("{}:{}", duration.as_nanos(), meta.len()).into())
         }
         Err(e) => {
-            warn!("Failed to read metadata for {}: {}", path, e);
+            debug!("Failed to read metadata for {}: {}", path, e);
             None
         }
     }

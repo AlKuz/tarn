@@ -1,3 +1,4 @@
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 use rmcp::ServiceExt;
@@ -7,6 +8,27 @@ use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde_json::Value;
 
 pub type Client = RunningService<rmcp::RoleClient, ()>;
+
+/// Wrapper ensuring the MCP client is fully shut down before the temp directory is deleted.
+/// Uses `ManuallyDrop` + `block_in_place` in `Drop` to synchronously await client cancellation,
+/// preventing the file watcher from seeing temp dir cleanup events.
+pub struct TestServer {
+    pub client: ManuallyDrop<Client>,
+    _tmp: tempfile::TempDir,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        // Safety: we only take the client once, in Drop
+        let client = unsafe { ManuallyDrop::take(&mut self.client) };
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let _ = client.cancel().await;
+            });
+        });
+        // _tmp drops here, after the child process has exited
+    }
+}
 
 pub fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tarn-mcp"))
@@ -29,7 +51,7 @@ pub fn copy_dir_all(src: &Path, dst: &Path) {
     }
 }
 
-pub async fn spawn_server(_with_index: bool) -> (tempfile::TempDir, Client) {
+pub async fn spawn_server(_with_index: bool) -> TestServer {
     let tmp = tempfile::tempdir().unwrap();
     let vault = tmp.path().join("vault");
     copy_dir_all(&vault_source(), &vault);
@@ -45,7 +67,10 @@ pub async fn spawn_server(_with_index: bool) -> (tempfile::TempDir, Client) {
     .unwrap();
 
     let client = ().serve(transport).await.unwrap();
-    (tmp, client)
+    TestServer {
+        client: ManuallyDrop::new(client),
+        _tmp: tmp,
+    }
 }
 
 /// Call a tool and parse the JSON response. Panics on tool errors.

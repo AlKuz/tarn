@@ -1,11 +1,16 @@
 use crate::common::*;
 use serde_json::json;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explore_topic_generates_messages() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = get_prompt(&client, "tarn_explore_topic", json!({"topic": "ownership"})).await;
+    let result = get_prompt(
+        &server.client,
+        "tarn_explore_topic",
+        json!({"topic": "ownership"}),
+    )
+    .await;
 
     assert!(result.description.unwrap().contains("ownership"));
     assert!(!result.messages.is_empty());
@@ -18,12 +23,12 @@ async fn explore_topic_generates_messages() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explore_topic_with_folder() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = get_prompt(
-        &client,
+        &server.client,
         "tarn_explore_topic",
         json!({"topic": "Rust", "folder": "wiki"}),
     )
@@ -32,11 +37,12 @@ async fn explore_topic_with_folder() {
     assert!(result.description.unwrap().contains("Rust"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explore_topic_missing_arg_returns_error() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = client
+    let result = server
+        .client
         .get_prompt(rmcp::model::GetPromptRequestParams::new(
             "tarn_explore_topic",
         ))
@@ -44,12 +50,12 @@ async fn explore_topic_missing_arg_returns_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summarize_project_generates_messages() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = get_prompt(
-        &client,
+        &server.client,
         "tarn_summarize_project",
         json!({"folder": "projects"}),
     )
@@ -59,11 +65,12 @@ async fn summarize_project_generates_messages() {
     assert!(result.messages.len() >= 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summarize_project_missing_arg_returns_error() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = client
+    let result = server
+        .client
         .get_prompt(rmcp::model::GetPromptRequestParams::new(
             "tarn_summarize_project",
         ))
@@ -71,21 +78,22 @@ async fn summarize_project_missing_arg_returns_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_prompt_returns_error() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = client
+    let result = server
+        .client
         .get_prompt(rmcp::model::GetPromptRequestParams::new("unknown_prompt"))
         .await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lists_all_prompts() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let prompts = client.list_all_prompts().await.unwrap();
+    let prompts = server.client.list_all_prompts().await.unwrap();
     let names: Vec<&str> = prompts.iter().map(|p| p.name.as_str()).collect();
 
     assert!(names.contains(&"tarn_explore_topic"));

@@ -6,23 +6,17 @@ use rmcp::model::{
 };
 
 use super::TarnMcpServer;
-use super::helpers::find_direct_children;
+use super::helpers::parse_folder;
 use super::responses::{
     FolderInfo, LinkInfo, NoteResourceResponse, SectionResourceResponse, VaultFoldersResponse,
     VaultInfo, VaultTagInfo, VaultTagsResponse,
 };
 use crate::TarnCore;
 use crate::common::VaultPath;
-
-fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
-    folder
-        .map(|f| {
-            let normalized = format!("{}/", f.trim_end_matches('/'));
-            VaultPath::new(normalized)
-                .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
-        })
-        .transpose()
-}
+use crate::index::Index;
+use crate::index::find_direct_children;
+use crate::observer::Observer;
+use crate::storage::Storage;
 
 fn internal_err(e: impl std::fmt::Display) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(e.to_string(), None)
@@ -38,7 +32,12 @@ fn json_resource(
     ]))
 }
 
-impl TarnMcpServer {
+impl<S, I, O> TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     pub fn list_static_resources(&self) -> ListResourcesResult {
         ListResourcesResult {
             resources: vec![
@@ -147,8 +146,7 @@ impl TarnMcpServer {
             .map_err(internal_err)?;
 
         let info = VaultInfo {
-            name: self.core.vault_name(),
-            root_path: self.core.vault_root().to_path_buf(),
+            name: self.core.vault_name().to_string(),
             folder,
             note_count: paths.len(),
             tag_count: tag_entries.len(),
@@ -224,7 +222,7 @@ impl TarnMcpServer {
         let (note, revision) = self.core.read(note_path).await.map_err(internal_err)?;
 
         let heading_path: Vec<&str> = section_path.split('/').collect();
-        let section = TarnCore::resolve_section(&note, &heading_path);
+        let section = TarnCore::<S, I, O>::resolve_section(&note, &heading_path);
 
         match section {
             Some(section) => {

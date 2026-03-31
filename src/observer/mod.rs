@@ -4,9 +4,11 @@ pub mod local;
 pub use config::ObserverConfig;
 pub use local::LocalStorageObserver;
 
+use std::future::Future;
+use std::path::PathBuf;
+
 use crate::common::{RevisionToken, VaultPath};
 use futures_core::stream::Stream;
-use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum StorageEvent {
@@ -29,7 +31,8 @@ pub enum ObserverError {
     WatchFailed(PathBuf, String),
 }
 
-#[allow(async_fn_in_trait)]
-pub trait Observer {
-    async fn observe(&self) -> Result<impl Stream<Item = StorageEvent>, ObserverError>;
+pub trait Observer: Send + Sync {
+    fn observe(
+        &self,
+    ) -> impl Future<Output = Result<impl Stream<Item = StorageEvent> + Send, ObserverError>> + Send;
 }

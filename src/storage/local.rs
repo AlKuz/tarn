@@ -6,7 +6,7 @@ use async_stream::stream;
 use futures_core::stream::Stream;
 use tokio::fs;
 
-use crate::common::{Configurable, RevisionToken, VaultPath};
+use crate::common::{Configurable, RevisionToken, VaultPath, VaultPathError};
 use crate::storage::config::{LocalStorageConfig, StorageConfig};
 use crate::storage::{File, FileContent, FileMeta, Storage, StorageError};
 
@@ -117,14 +117,14 @@ impl LocalStorage {
         self.denied_paths
             .read()
             .map(|guard| guard.contains(path))
-            .unwrap_or(false)
+            .unwrap_or(true) // fail-closed: deny on poison
     }
 
     fn is_read_only(&self, path: &VaultPath) -> bool {
         self.read_only_paths
             .read()
             .map(|guard| guard.contains(path))
-            .unwrap_or(false)
+            .unwrap_or(true) // fail-closed: read-only on poison
     }
 
     fn resolve(&self, path: &VaultPath) -> Result<PathBuf, StorageError> {
@@ -158,8 +158,12 @@ impl LocalStorage {
 }
 
 impl Storage for LocalStorage {
-    async fn list(&self) -> Result<impl Stream<Item = FileMeta>, StorageError> {
-        let root = self.path.clone();
+    async fn list(&self, folder: &VaultPath) -> Result<impl Stream<Item = FileMeta>, StorageError> {
+        if !folder.is_folder() {
+            return Err(StorageError::InvalidPath(VaultPathError::NotFolder));
+        }
+
+        let root = folder.with_root(&self.path);
         Ok(stream! {
             let mut stack = vec![root.clone()];
             while let Some(dir) = stack.pop() {
@@ -241,10 +245,11 @@ impl Storage for LocalStorage {
 
         let full_path = self.resolve(path)?;
 
-        if fs::try_exists(&full_path).await.unwrap_or(false)
-            && let Some(expected) = &expected_token
-        {
-            self.check_revision(path, expected).await?;
+        if fs::try_exists(&full_path).await.unwrap_or(false) {
+            match &expected_token {
+                Some(expected) => self.check_revision(path, expected).await?,
+                None => return Err(StorageError::FileAlreadyExists(path.clone())),
+            }
         }
 
         if let Some(parent) = full_path.parent() {
@@ -356,15 +361,19 @@ impl Storage for LocalStorage {
     }
 
     fn deny_access(&self, paths: &[VaultPath]) {
-        if let Ok(mut guard) = self.denied_paths.write() {
-            *guard = paths.iter().cloned().collect();
-        }
+        let mut guard = self
+            .denied_paths
+            .write()
+            .expect("denied_paths lock poisoned");
+        *guard = paths.iter().cloned().collect();
     }
 
     fn read_only_access(&self, paths: &[VaultPath]) {
-        if let Ok(mut guard) = self.read_only_paths.write() {
-            *guard = paths.iter().cloned().collect();
-        }
+        let mut guard = self
+            .read_only_paths
+            .write()
+            .expect("read_only_paths lock poisoned");
+        *guard = paths.iter().cloned().collect();
     }
 }
 

@@ -6,8 +6,9 @@ use thiserror::Error;
 
 use crate::common::Buildable;
 use crate::index::in_memory::InMemoryIndexError;
-use crate::index::{IndexBuildError, IndexConfig, default_persistence_path};
-use crate::storage::{LocalStorageConfig, StorageConfig};
+use crate::index::{Index, IndexBuildError, IndexConfig, default_persistence_path};
+use crate::observer::{Observer, ObserverConfig};
+use crate::storage::{LocalStorageConfig, Storage, StorageConfig};
 
 use super::tarn_core::TarnCore;
 
@@ -37,14 +38,22 @@ impl From<InMemoryIndexError> for BuildError {
     }
 }
 
+impl From<std::convert::Infallible> for BuildError {
+    fn from(e: std::convert::Infallible) -> Self {
+        match e {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TarnConfig
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TarnConfig {
-    pub storage: StorageConfig,
-    pub index: IndexConfig,
+pub struct TarnConfig<SC = StorageConfig, IC = IndexConfig, OC = ObserverConfig> {
+    pub vault_name: String,
+    pub storage: SC,
+    pub index: IC,
+    pub observer: OC,
 }
 
 impl TarnConfig {
@@ -54,12 +63,16 @@ impl TarnConfig {
     /// based on the platform data directory.
     pub fn local(path: std::path::PathBuf) -> Self {
         let persistence_path = default_persistence_path(&path);
+        let vault_name = path.to_string_lossy().to_string();
+        let observer = ObserverConfig::Local { path: path.clone() };
         TarnConfig {
+            vault_name,
             storage: StorageConfig::Local(LocalStorageConfig { path }),
             index: IndexConfig::InMemory {
                 tokenizer: Default::default(),
                 persistence_path,
             },
+            observer,
         }
     }
 
@@ -70,19 +83,31 @@ impl TarnConfig {
         let vault_path = match &storage {
             StorageConfig::Local(conf) => &conf.path,
         };
+        let vault_name = vault_path.to_string_lossy().to_string();
         let persistence_path = default_persistence_path(vault_path);
+        let observer = ObserverConfig::Local {
+            path: vault_path.clone(),
+        };
         Ok(TarnConfig {
+            vault_name,
             storage,
             index: IndexConfig::InMemory {
                 tokenizer: Default::default(),
                 persistence_path,
             },
+            observer,
         })
     }
 
     /// Override the index configuration.
     pub fn with_index(mut self, config: IndexConfig) -> Self {
         self.index = config;
+        self
+    }
+
+    /// Override the observer configuration.
+    pub fn with_observer(mut self, config: ObserverConfig) -> Self {
+        self.observer = config;
         self
     }
 
@@ -105,22 +130,29 @@ impl TarnConfig {
     }
 }
 
-impl Buildable for TarnConfig {
-    type Target = TarnCore;
+impl<SC, IC, OC> Buildable for TarnConfig<SC, IC, OC>
+where
+    SC: Buildable + Serialize + for<'de> Deserialize<'de>,
+    IC: Buildable + Serialize + for<'de> Deserialize<'de>,
+    OC: Buildable + Serialize + for<'de> Deserialize<'de>,
+    SC::Target: Storage + Send + Sync + 'static,
+    IC::Target: Index + Send + Sync + 'static,
+    OC::Target: Observer + Send + Sync + 'static,
+    BuildError: From<SC::Error> + From<IC::Error> + From<OC::Error>,
+{
+    type Target = TarnCore<SC::Target, IC::Target, OC::Target>;
     type Error = BuildError;
 
     fn build(&self) -> Result<Self::Target, Self::Error> {
-        let storage = self.storage.build()?;
-        let vault_path = match &self.storage {
-            StorageConfig::Local(conf) => conf.path.clone(),
-        };
-
+        let storage = Arc::new(self.storage.build()?);
         let index = Arc::new(self.index.build()?);
+        let observer = Arc::new(self.observer.build()?);
 
-        Ok(TarnCore {
+        Ok(TarnCore::new(
             storage,
-            vault_path,
+            self.vault_name.clone(),
             index,
-        })
+            observer,
+        ))
     }
 }

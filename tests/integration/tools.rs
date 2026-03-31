@@ -5,11 +5,16 @@ use serde_json::{Value, json};
 // tarn_search_notes
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_notes_basic() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = call_tool(&client, "tarn_search_notes", json!({"query": "Rust"})).await;
+    let result = call_tool(
+        &server.client,
+        "tarn_search_notes",
+        json!({"query": "Rust"}),
+    )
+    .await;
 
     assert!(result["total"].as_u64().unwrap() > 0);
     let paths: Vec<&str> = result["results"]
@@ -21,18 +26,18 @@ async fn search_notes_basic() {
     assert!(paths.contains(&"wiki/Rust.md"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_case_insensitive() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let lower = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "rust", "limit": 100}),
     )
     .await;
     let upper = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "RUST", "limit": 100}),
     )
@@ -41,12 +46,12 @@ async fn search_case_insensitive() {
     assert_eq!(lower["total"], upper["total"]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_within_folder() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "Rust", "folder": "wiki"}),
     )
@@ -57,12 +62,12 @@ async fn search_within_folder() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_by_tag_filter() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "web", "tag_filter": ["programming/web"], "limit": 50}),
     )
@@ -79,13 +84,13 @@ async fn search_by_tag_filter() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_pagination() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     // Use a broad query that matches many notes for pagination testing
     let all = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "project", "limit": 100}),
     )
@@ -94,13 +99,13 @@ async fn search_pagination() {
     assert!(total >= 3, "need at least 3 results for pagination test");
 
     let page1 = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "project", "limit": 2, "offset": 0}),
     )
     .await;
     let page2 = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "project", "limit": 2, "offset": 2}),
     )
@@ -111,24 +116,12 @@ async fn search_pagination() {
     assert_eq!(page1["results"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
-async fn search_returns_snippets() {
-    let (_tmp, client) = spawn_server(false).await;
-
-    let result = call_tool(&client, "tarn_search_notes", json!({"query": "ownership"})).await;
-
-    assert!(!result["results"].as_array().unwrap().is_empty());
-    for r in result["results"].as_array().unwrap() {
-        assert!(!r["snippet"].as_str().unwrap().is_empty());
-    }
-}
-
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_in_nested_folder() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "API", "folder": "projects/webapp"}),
     )
@@ -144,11 +137,11 @@ async fn search_in_nested_folder() {
 // tarn_get_tags
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_tags_all() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = call_tool(&client, "tarn_get_tags", json!({})).await;
+    let result = call_tool(&server.client, "tarn_get_tags", json!({})).await;
 
     let tag_names: Vec<&str> = result["tags"]
         .as_array()
@@ -160,11 +153,16 @@ async fn get_tags_all() {
     assert!(tag_names.contains(&"project"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_tags_with_prefix() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = call_tool(&client, "tarn_get_tags", json!({"prefix": "programming"})).await;
+    let result = call_tool(
+        &server.client,
+        "tarn_get_tags",
+        json!({"prefix": "programming"}),
+    )
+    .await;
 
     let tag_names: Vec<&str> = result["tags"]
         .as_array()
@@ -176,12 +174,12 @@ async fn get_tags_with_prefix() {
     assert!(tag_names.contains(&"programming/web"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_tags_with_notes() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_get_tags",
         json!({"prefix": "daily", "include_notes": true}),
     )
@@ -202,11 +200,11 @@ async fn get_tags_with_notes() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_tags_hierarchy() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let result = call_tool(&client, "tarn_get_tags", json!({})).await;
+    let result = call_tool(&server.client, "tarn_get_tags", json!({})).await;
 
     let programming = result["tags"]
         .as_array()
@@ -222,12 +220,12 @@ async fn get_tags_hierarchy() {
 // tarn_create_note
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_note_success() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_create_note",
         json!({"path": "test/new-note.md", "content": "# Test\n\nHello world"}),
     )
@@ -237,17 +235,17 @@ async fn create_note_success() {
     assert!(!result["revision"].as_str().unwrap().is_empty());
 
     // Read it back via resource
-    let note = read_resource(&client, "tarn://note/test/new-note.md").await;
+    let note = read_resource(&server.client, "tarn://note/test/new-note.md").await;
     assert_eq!(note["title"], "Test");
     assert!(note["content"].as_str().unwrap().contains("Hello world"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_note_existing_fails() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let error = call_tool_expect_error(
-        &client,
+        &server.client,
         "tarn_create_note",
         json!({"path": "wiki/Rust.md", "content": "# Duplicate"}),
     )
@@ -260,17 +258,17 @@ async fn create_note_existing_fails() {
 // tarn_update_note
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_note_with_valid_revision() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     // Read to get revision via resource
-    let note = read_resource(&client, "tarn://note/wiki/Rust.md").await;
+    let note = read_resource(&server.client, "tarn://note/wiki/Rust.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     // Update
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_update_note",
         json!({
             "path": "wiki/Rust.md",
@@ -285,12 +283,12 @@ async fn update_note_with_valid_revision() {
     assert_ne!(result["revision"].as_str().unwrap(), revision);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_note_wrong_revision_fails() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     let error = call_tool_expect_error(
-        &client,
+        &server.client,
         "tarn_update_note",
         json!({
             "path": "wiki/Rust.md",
@@ -307,15 +305,15 @@ async fn update_note_wrong_revision_fails() {
 // tarn_replace_in_note
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_in_note_first_mode() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let note = read_resource(&client, "tarn://note/wiki/Rust.md").await;
+    let note = read_resource(&server.client, "tarn://note/wiki/Rust.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_replace_in_note",
         json!({
             "path": "wiki/Rust.md",
@@ -330,28 +328,28 @@ async fn replace_in_note_first_mode() {
     assert_eq!(result["path"], "wiki/Rust.md");
 
     // Verify the replacement via resource
-    let updated = read_resource(&client, "tarn://note/wiki/Rust.md").await;
+    let updated = read_resource(&server.client, "tarn://note/wiki/Rust.md").await;
     let content = updated["content"].as_str().unwrap();
     assert!(content.contains("Rust (edited)"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_in_note_all_mode() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     // Create a note with repeated text
     call_tool(
-        &client,
+        &server.client,
         "tarn_create_note",
         json!({"path": "test/replace-all.md", "content": "foo bar foo baz foo"}),
     )
     .await;
 
-    let note = read_resource(&client, "tarn://note/test/replace-all.md").await;
+    let note = read_resource(&server.client, "tarn://note/test/replace-all.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     call_tool(
-        &client,
+        &server.client,
         "tarn_replace_in_note",
         json!({
             "path": "test/replace-all.md",
@@ -363,28 +361,28 @@ async fn replace_in_note_all_mode() {
     )
     .await;
 
-    let updated = read_resource(&client, "tarn://note/test/replace-all.md").await;
+    let updated = read_resource(&server.client, "tarn://note/test/replace-all.md").await;
     let content = updated["content"].as_str().unwrap();
     assert!(!content.contains("foo"));
     assert!(content.contains("qux"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_in_note_regex_mode() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
     call_tool(
-        &client,
+        &server.client,
         "tarn_create_note",
         json!({"path": "test/replace-regex.md", "content": "date: 2024-01-15\ndate: 2024-01-16"}),
     )
     .await;
 
-    let note = read_resource(&client, "tarn://note/test/replace-regex.md").await;
+    let note = read_resource(&server.client, "tarn://note/test/replace-regex.md").await;
     let revision = note["revision"].as_str().unwrap();
 
     call_tool(
-        &client,
+        &server.client,
         "tarn_replace_in_note",
         json!({
             "path": "test/replace-regex.md",
@@ -396,7 +394,7 @@ async fn replace_in_note_regex_mode() {
     )
     .await;
 
-    let updated = read_resource(&client, "tarn://note/test/replace-regex.md").await;
+    let updated = read_resource(&server.client, "tarn://note/test/replace-regex.md").await;
     let content = updated["content"].as_str().unwrap();
     assert!(content.contains("2024/01/15"));
     assert!(content.contains("2024/01/16"));
@@ -406,11 +404,11 @@ async fn replace_in_note_regex_mode() {
 // Tool Listing
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lists_all_tools() {
-    let (_tmp, client) = spawn_server(false).await;
+    let server = spawn_server(false).await;
 
-    let tools = client.list_all_tools().await.unwrap();
+    let tools = server.client.list_all_tools().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
 
     assert!(names.contains(&"tarn_search_notes"));
@@ -425,12 +423,12 @@ async fn lists_all_tools() {
 // With Index
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_with_index() {
-    let (_tmp, client) = spawn_server(true).await;
+    let server = spawn_server(true).await;
 
     let result = call_tool(
-        &client,
+        &server.client,
         "tarn_search_notes",
         json!({"query": "Rust ownership"}),
     )

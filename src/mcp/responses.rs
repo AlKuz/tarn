@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::Serialize;
 
 use crate::common::{RevisionToken, VaultPath};
@@ -9,7 +7,6 @@ use crate::note_handler::{Frontmatter, Link};
 pub struct SearchResult {
     pub path: String,
     pub title: Option<String>,
-    pub snippet: String,
     pub tags: Vec<String>,
 }
 
@@ -50,7 +47,6 @@ pub struct GetTagsResponse {
 #[derive(Debug, Serialize)]
 pub struct VaultInfo {
     pub name: String,
-    pub root_path: PathBuf,
     pub folder: Option<VaultPath>,
     pub note_count: usize,
     pub tag_count: usize,

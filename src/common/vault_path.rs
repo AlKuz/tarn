@@ -15,6 +15,8 @@ pub enum VaultPathError {
     InvalidRoot,
     #[error("path is not under root")]
     NotUnderRoot,
+    #[error("path is not folder")]
+    NotFolder,
     #[error("invalid sub-note path: {0}")]
     InvalidSubNotePath(String),
 }
@@ -173,16 +175,18 @@ impl VaultPath {
         }
     }
 
-    /// Converts to a platform-native `PathBuf`.
+    /// Joins this vault path with a root directory to produce a full filesystem path.
     ///
-    /// For Section and Block variants, returns the note portion only (before `#`).
-    pub fn as_path_buf(&self) -> PathBuf {
+    /// For Section and Block variants, uses the note portion only (before `#`).
+    /// Uses `PathBuf::join` which handles platform-specific separators automatically.
+    #[allow(clippy::ptr_arg)]
+    pub fn with_root(&self, root: &PathBuf) -> PathBuf {
         match self {
             VaultPath::Section(s) | VaultPath::Block(s) => {
                 let note_part = s.split_once('#').map(|(p, _)| p).unwrap_or(s);
-                PathBuf::from(note_part)
+                root.join(note_part)
             }
-            _ => PathBuf::from(self.as_str()),
+            _ => root.join(self.as_str()),
         }
     }
 
@@ -539,9 +543,13 @@ mod tests {
     }
 
     #[test]
-    fn block_path_buf_returns_note() {
+    fn block_with_root_returns_note() {
+        let root = PathBuf::from("/vault");
         let block = VaultPath::new("folder/note.md#^block-id").unwrap();
-        assert_eq!(block.as_path_buf(), PathBuf::from("folder/note.md"));
+        assert_eq!(
+            block.with_root(&root),
+            PathBuf::from("/vault/folder/note.md")
+        );
     }
 
     #[test]
@@ -864,14 +872,20 @@ mod tests {
     }
 
     #[test]
-    fn to_path_buf() {
+    fn with_root() {
+        let root = PathBuf::from("/vault");
         let path = VaultPath::new("projects/note.md").unwrap();
-        let pb = path.as_path_buf();
-        assert_eq!(pb, PathBuf::from("projects/note.md"));
+        assert_eq!(
+            path.with_root(&root),
+            PathBuf::from("/vault/projects/note.md")
+        );
 
         // Section returns note portion only
         let section = VaultPath::new("projects/note.md#Goals").unwrap();
-        assert_eq!(section.as_path_buf(), PathBuf::from("projects/note.md"));
+        assert_eq!(
+            section.with_root(&root),
+            PathBuf::from("/vault/projects/note.md")
+        );
     }
 
     #[test]

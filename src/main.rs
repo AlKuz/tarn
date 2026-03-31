@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
     core.rebuild_index().await?;
     tracing::info!("index rebuilt");
 
-    let _index_sync_handle = core.start_index_sync();
+    let index_sync_handle = core.start_index_sync();
     tracing::info!("index sync started");
 
     match cli.transport {
@@ -136,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
             let server = TarnMcpServer::new(core);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
+            index_sync_handle.abort();
         }
         Transport::Http => {
             let ct = tokio_util::sync::CancellationToken::new();
@@ -186,5 +187,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    index_sync_handle.abort();
     Ok(())
 }

@@ -3,9 +3,18 @@ use rmcp::model::{
     PromptMessage, PromptMessageRole, RawResource,
 };
 
+use crate::index::Index;
+use crate::observer::Observer;
+use crate::storage::Storage;
+
 use super::TarnMcpServer;
 
-impl TarnMcpServer {
+impl<S, I, O> TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     pub fn list_prompts_static(&self) -> ListPromptsResult {
         ListPromptsResult {
             prompts: vec![
