@@ -16,9 +16,13 @@
 //! fail with [`StorageError::Conflict`] if the file was modified since the token
 //! was issued.
 
+pub mod config;
 pub mod local;
 
+pub use config::{LocalStorageConfig, StorageConfig};
 pub use local::LocalStorage;
+
+use std::future::Future;
 
 use crate::common::{DataURI, RevisionToken, VaultPath};
 use futures_core::stream::Stream;
@@ -68,31 +72,35 @@ pub struct File {
 ///
 /// Implementations must provide async file operations with revision-based
 /// conflict detection.
-#[allow(async_fn_in_trait)]
-pub trait Storage {
-    async fn list(&self) -> Result<impl Stream<Item = FileMeta>, StorageError>;
-    async fn read(&self, path: &VaultPath) -> Result<File, StorageError>;
-    async fn write(
+pub trait Storage: Send + Sync {
+    fn list(
+        &self,
+        folder: &VaultPath,
+    ) -> impl Future<Output = Result<impl Stream<Item = FileMeta> + Send, StorageError>> + Send;
+    fn read(&self, path: &VaultPath) -> impl Future<Output = Result<File, StorageError>> + Send;
+    fn write(
         &self,
         path: &VaultPath,
         data: FileContent,
         expected_token: Option<RevisionToken>,
-    ) -> Result<RevisionToken, StorageError>;
-    async fn delete(
+    ) -> impl Future<Output = Result<RevisionToken, StorageError>> + Send;
+    fn delete(
         &self,
         path: &VaultPath,
         expected_token: RevisionToken,
-    ) -> Result<(), StorageError>;
-    async fn r#move(
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn r#move(
         &self,
         from: &VaultPath,
         to: &VaultPath,
         expected_token: RevisionToken,
-    ) -> Result<(), StorageError>;
-    async fn copy(&self, from: &VaultPath, to: &VaultPath) -> Result<RevisionToken, StorageError>;
-    async fn exists(&self, path: &VaultPath) -> Result<bool, StorageError>;
-    // Update internal state with deny list
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn copy(
+        &self,
+        from: &VaultPath,
+        to: &VaultPath,
+    ) -> impl Future<Output = Result<RevisionToken, StorageError>> + Send;
+    fn exists(&self, path: &VaultPath) -> impl Future<Output = Result<bool, StorageError>> + Send;
     fn deny_access(&self, paths: &[VaultPath]);
-    // Update internal state with read only access
     fn read_only_access(&self, paths: &[VaultPath]);
 }

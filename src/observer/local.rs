@@ -5,9 +5,10 @@ use futures_core::stream::Stream;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::fs;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::debug;
 
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::{Configurable, RevisionToken, VaultPath};
+use crate::observer::config::ObserverConfig;
 use crate::observer::{Observer, ObserverError, StorageEvent};
 
 pub struct LocalStorageObserver {
@@ -17,6 +18,16 @@ pub struct LocalStorageObserver {
 impl LocalStorageObserver {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+}
+
+impl Configurable for LocalStorageObserver {
+    type Config = ObserverConfig;
+
+    fn config(&self) -> Self::Config {
+        ObserverConfig::Local {
+            path: self.path.clone(),
+        }
     }
 }
 
@@ -35,7 +46,7 @@ async fn try_revision_token(root: &Path, path: &VaultPath) -> Option<RevisionTok
             Some(format!("{}:{}", duration.as_nanos(), meta.len()).into())
         }
         Err(e) => {
-            warn!("Failed to read metadata for {}: {}", path, e);
+            debug!("Failed to read metadata for {}: {}", path, e);
             None
         }
     }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::common::{Buildable, Configurable, VaultPath};
+use crate::common::{Configurable, VaultPath};
 use crate::note_handler::Note;
 use crate::tokenizer::{Tokenizer, TokenizerConfig};
 
@@ -68,6 +68,11 @@ impl IndexData {
             bm25_index: BM25Index::new(),
         }
     }
+
+    /// Check if a note has any sections in the index.
+    fn has_note(&self, note_path: &VaultPath) -> bool {
+        self.sections.values().any(|e| &e.note_path == note_path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,33 +92,33 @@ pub struct InMemoryIndex {
 }
 
 impl InMemoryIndex {
-    /// Create an index from config. Loads from persistence path if exists.
-    pub async fn new(config: IndexConfig) -> Result<Self, InMemoryIndexError> {
-        let IndexConfig::InMemory {
-            ref tokenizer,
-            ref persistence_path,
-        } = config;
-
-        let tok = tokenizer.clone().build()?;
-
-        let inner = match persistence_path {
+    /// Create an index with the given tokenizer and optional persistence path.
+    ///
+    /// If a persistence path is provided and exists, the index is loaded from disk.
+    /// The tokenizer config is checked against the persisted config — if they differ,
+    /// the persisted data is discarded and a fresh index is created.
+    pub fn new(
+        tokenizer: Box<dyn Tokenizer>,
+        persistence_path: Option<PathBuf>,
+    ) -> Result<Self, InMemoryIndexError> {
+        let tokenizer_config = tokenizer.config();
+        let inner = match &persistence_path {
             Some(path) if path.exists() => {
-                let data = tokio::fs::read(path).await?;
+                let data = std::fs::read(path)?;
                 let index_data: IndexData = serde_json::from_slice(&data)?;
-                if index_data.meta.tokenizer_config == *tokenizer {
+                if index_data.meta.tokenizer_config == tokenizer_config {
                     index_data
                 } else {
                     tracing::info!("tokenizer config changed, rebuilding index");
-                    IndexData::new(tokenizer.clone())
+                    IndexData::new(tokenizer_config)
                 }
             }
-            _ => IndexData::new(tokenizer.clone()),
+            _ => IndexData::new(tokenizer_config),
         };
-
         Ok(Self {
             data: RwLock::new(inner),
-            tokenizer: tok,
-            persistence_path: persistence_path.clone(),
+            tokenizer,
+            persistence_path,
         })
     }
 
@@ -128,6 +133,11 @@ impl InMemoryIndex {
             serde_json::to_vec(&*inner)?
         };
 
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
         // Atomic write: temp file + rename
         let temp_path = path.with_extension("tmp");
         tokio::fs::write(&temp_path, &data).await?;
@@ -137,19 +147,25 @@ impl InMemoryIndex {
     }
 
     /// Build a section VaultPath from a note path and heading path.
-    fn make_section_path(note_path: &VaultPath, heading_path: &[String]) -> VaultPath {
+    fn make_section_path(
+        note_path: &VaultPath,
+        heading_path: &[String],
+    ) -> Result<VaultPath, IndexError> {
         let section_path_str = heading_path.join("/");
-        VaultPath::new(format!("{}#{}", note_path.as_str(), section_path_str))
-            .expect("valid section path from note path and headings")
+        VaultPath::new(format!("{}#{}", note_path.as_str(), section_path_str)).map_err(|e| {
+            IndexError::Backend(format!("invalid section path for {}: {}", note_path, e))
+        })
     }
 
-    /// Index a note, extracting all sections.
+    /// Index a note, extracting all sections. Increments note_count if new.
     fn index_note(
         inner: &mut IndexData,
         tokenizer: &dyn Tokenizer,
         note: &Note,
         note_path: &VaultPath,
     ) {
+        let is_new = !inner.has_note(note_path);
+
         // Get frontmatter tags (attached to all sections)
         let frontmatter_tags: Vec<String> = note
             .frontmatter
@@ -158,7 +174,13 @@ impl InMemoryIndex {
             .unwrap_or_default();
 
         for section in &note.sections {
-            let section_path = Self::make_section_path(note_path, &section.heading_path);
+            let section_path = match Self::make_section_path(note_path, &section.heading_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(note = %note_path, error = %e, "skipping section with invalid path");
+                    continue;
+                }
+            };
 
             // Combine frontmatter tags with inline tags
             let mut all_tags: Vec<String> = frontmatter_tags.clone();
@@ -166,18 +188,18 @@ impl InMemoryIndex {
 
             // Convert links to IndexLink
             let links: Vec<IndexLink> = section.links.iter().map(IndexLink::from).collect();
+            let tokens = tokenizer.tokenize(&section.content);
 
             let entry = SectionEntry {
                 note_path: note_path.clone(),
                 heading_path: section.heading_path.clone(),
                 tags: all_tags.clone(),
                 links,
-                word_count: section.word_count(),
+                token_count: tokens.len(),
                 revision: crate::common::RevisionToken::from(chrono::Utc::now().to_rfc3339()),
             };
 
             // Add to BM25 index
-            let tokens = tokenizer.tokenize(&section.content);
             inner.bm25_index.add_document(section_path.clone(), &tokens);
 
             // Add to tag index
@@ -186,11 +208,14 @@ impl InMemoryIndex {
             // Store section entry
             inner.sections.insert(section_path, entry);
         }
+
+        if is_new {
+            inner.meta.note_count += 1;
+        }
     }
 
-    /// Remove all sections for a note path.
+    /// Remove all sections for a note path. Decrements note_count if removed.
     fn remove_note_sections(inner: &mut IndexData, note_path: &VaultPath) {
-        // Find all section paths for this note
         let section_paths: Vec<VaultPath> = inner
             .sections
             .keys()
@@ -198,10 +223,13 @@ impl InMemoryIndex {
             .cloned()
             .collect();
 
-        for section_path in section_paths {
-            inner.sections.remove(&section_path);
-            inner.tag_index.remove(&section_path);
-            inner.bm25_index.remove_document(&section_path);
+        if !section_paths.is_empty() {
+            for section_path in section_paths {
+                inner.sections.remove(&section_path);
+                inner.tag_index.remove(&section_path);
+                inner.bm25_index.remove_document(&section_path);
+            }
+            inner.meta.note_count = inner.meta.note_count.saturating_sub(1);
         }
     }
 }
@@ -249,13 +277,6 @@ impl Index for InMemoryIndex {
             // Index the note
             Self::index_note(&mut inner, &*self.tokenizer, note, note_path);
 
-            // Update metadata
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
             inner.meta.last_indexed = Some(chrono::Utc::now());
         }
 
@@ -266,14 +287,6 @@ impl Index for InMemoryIndex {
         {
             let mut inner = self.data.write().await;
             Self::remove_note_sections(&mut inner, path);
-
-            // Update note count
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
         }
 
         self.persist().await.map_err(Into::into)
@@ -296,7 +309,7 @@ impl Index for InMemoryIndex {
         let bm25_results = inner.bm25_index.search(&query_tokens, bm25_limit);
 
         // Filter results
-        let mut results: Vec<(SectionEntry, f32)> = bm25_results
+        let results: Vec<(SectionEntry, f32)> = bm25_results
             .into_iter()
             .filter_map(|(section_path, score)| {
                 let entry = inner.sections.get(&section_path)?;
@@ -321,9 +334,6 @@ impl Index for InMemoryIndex {
             .skip(params.offset)
             .take(params.limit)
             .collect();
-
-        // Already sorted by BM25 score descending
-        results.truncate(params.limit);
 
         Ok(results)
     }
@@ -424,13 +434,6 @@ impl Index for InMemoryIndex {
                 Self::index_note(&mut inner, &*self.tokenizer, note, note_path);
             }
 
-            // Update metadata
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
             inner.meta.last_indexed = Some(chrono::Utc::now());
         }
 
@@ -444,14 +447,6 @@ impl Index for InMemoryIndex {
             for path in paths {
                 Self::remove_note_sections(&mut inner, path);
             }
-
-            // Update note count
-            inner.meta.note_count = inner
-                .sections
-                .values()
-                .map(|e| &e.note_path)
-                .collect::<HashSet<_>>()
-                .len();
         }
 
         self.persist().await.map_err(Into::into)
@@ -485,6 +480,16 @@ impl From<&crate::note_handler::Link> for IndexLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Buildable;
+
+    fn make_index() -> InMemoryIndex {
+        IndexConfig::InMemory {
+            tokenizer: TokenizerConfig::default(),
+            persistence_path: None,
+        }
+        .build()
+        .unwrap()
+    }
 
     fn make_note(path: &str, content: &str) -> Note {
         let mut note = Note::from(content);
@@ -497,30 +502,26 @@ mod tests {
         let path = VaultPath::new("projects/alpha.md").unwrap();
 
         // Root section
-        let sp = InMemoryIndex::make_section_path(&path, &[]);
+        let sp = InMemoryIndex::make_section_path(&path, &[]).unwrap();
         assert_eq!(sp.as_str(), "projects/alpha.md#");
         assert_eq!(sp.note_path(), Some(path.clone()));
         assert!(sp.section_headings().is_empty());
 
         // Single heading
-        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string()]);
+        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string()]).unwrap();
         assert_eq!(sp.as_str(), "projects/alpha.md#Goals");
         assert_eq!(sp.section_headings(), vec!["Goals"]);
 
         // Nested headings
-        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string(), "Q1".to_string()]);
+        let sp = InMemoryIndex::make_section_path(&path, &["Goals".to_string(), "Q1".to_string()])
+            .unwrap();
         assert_eq!(sp.as_str(), "projects/alpha.md#Goals/Q1");
         assert_eq!(sp.section_headings(), vec!["Goals", "Q1"]);
     }
 
     #[tokio::test]
     async fn index_and_search() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note1 = make_note(
             "rust-guide.md",
@@ -550,12 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_sections_for_note() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note(
             "note.md",
@@ -572,12 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_note() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note("note.md", "# Test\n\nContent.\n");
         index.update(&note).await.unwrap();
@@ -594,12 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_index() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note("note.md", "Content.\n");
         index.update(&note).await.unwrap();
@@ -613,12 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_with_folder_filter() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note1 = make_note(
             "projects/alpha/design.md",
@@ -654,12 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn backlinks() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note1 = make_note("note1.md", "Check [[note2]] for details.\n");
         let note2 = make_note("note2.md", "Reference content.\n");
@@ -675,12 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn forward_links() {
-        let index = InMemoryIndex::new(IndexConfig::InMemory {
-            tokenizer: TokenizerConfig::default(),
-            persistence_path: None,
-        })
-        .await
-        .unwrap();
+        let index = make_index();
 
         let note = make_note("note.md", "See [[target1]] and [[target2|alias]].\n");
         index.update(&note).await.unwrap();
@@ -702,14 +673,14 @@ mod tests {
         };
 
         // Create index, add data, persist
-        let index = InMemoryIndex::new(make_config()).await.unwrap();
+        let index = make_config().build().unwrap();
         let note = make_note("note.md", "# Test\n\nRust programming.\n");
         index.update(&note).await.unwrap();
         assert_eq!(index.count().await.unwrap(), 1);
         drop(index);
 
         // Reload with same config — data should be preserved
-        let index = InMemoryIndex::new(make_config()).await.unwrap();
+        let index = make_config().build().unwrap();
         assert_eq!(index.count().await.unwrap(), 1);
     }
 
@@ -723,29 +694,27 @@ mod tests {
             tokenizer: TokenizerConfig::default(),
             persistence_path: Some(index_path.clone()),
         };
-        let index = InMemoryIndex::new(config).await.unwrap();
+        let index = config.build().unwrap();
         let note = make_note("note.md", "# Test\n\nRust programming.\n");
         index.update(&note).await.unwrap();
         assert_eq!(index.count().await.unwrap(), 1);
         drop(index);
 
         // Tamper the persisted meta to simulate a different tokenizer config
-        let data = tokio::fs::read(&index_path).await.unwrap();
+        let data = std::fs::read(&index_path).unwrap();
         let mut snapshot: serde_json::Value = serde_json::from_slice(&data).unwrap();
         snapshot["meta"]["tokenizer_config"] = serde_json::json!({
             "type": "hugging_face",
             "model_id": "bert-base-uncased"
         });
-        tokio::fs::write(&index_path, serde_json::to_vec(&snapshot).unwrap())
-            .await
-            .unwrap();
+        std::fs::write(&index_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
 
         // Reload with Naive — snapshot has HuggingFace, so mismatch → fresh index
         let config = IndexConfig::InMemory {
             tokenizer: TokenizerConfig::default(),
             persistence_path: Some(index_path.clone()),
         };
-        let index = InMemoryIndex::new(config).await.unwrap();
+        let index = config.build().unwrap();
         assert_eq!(index.count().await.unwrap(), 0);
     }
 }

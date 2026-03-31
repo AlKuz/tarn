@@ -3,9 +3,18 @@ use rmcp::model::{
     PromptMessage, PromptMessageRole, RawResource,
 };
 
+use crate::index::Index;
+use crate::observer::Observer;
+use crate::storage::Storage;
+
 use super::TarnMcpServer;
 
-impl TarnMcpServer {
+impl<S, I, O> TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     pub fn list_prompts_static(&self) -> ListPromptsResult {
         ListPromptsResult {
             prompts: vec![
@@ -63,8 +72,8 @@ impl TarnMcpServer {
                         PromptMessageRole::User,
                         format!(
                             "Explore my vault for everything related to \"{topic}\"{folder_context}. \
-                            Use tarn_search_notes to find relevant notes, then tarn_read_note with \
-                            include_links=true on the top results. Synthesize a summary of what I \
+                            Use tarn_search_notes to find relevant notes, then read the top results \
+                            via the tarn://note/{{path}} resource. Synthesize a summary of what I \
                             know about this topic, what's well-documented, and where there are gaps."
                         ),
                     ),
@@ -92,8 +101,8 @@ impl TarnMcpServer {
                     PromptMessage::new_text(
                         PromptMessageRole::User,
                         format!(
-                            "Summarize the project in \"{folder}\". Use tarn_list_notes to find all notes, \
-                            tarn_read_note(summary=true) for each, and analyze how they connect. \
+                            "Summarize the project in \"{folder}\". Use tarn_search_notes(query=\"\", folder=\"{folder}\") \
+                            to find all notes, then read each via the tarn://note/{{path}} resource. \
                             Produce a status report: key documents, open topics, tag distribution, \
                             and an overview of the project structure."
                         ),

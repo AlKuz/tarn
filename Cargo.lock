@@ -2264,6 +2264,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "dirs",
  "futures-core",
  "lingua",
  "notify",
