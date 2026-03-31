@@ -5,11 +5,9 @@
 //!
 //! ## Tools
 //!
-//! Interactive operations for searching, listing, and reading notes:
+//! Discover and modify notes:
 //!
-//! - `tarn_read_note` - Read note content with fragment retrieval and summary modes
 //! - `tarn_search_notes` - Full-text search with BM25 ranking (if index configured)
-//! - `tarn_list_notes` - List notes with folder/tag filtering and pagination
 //! - `tarn_get_tags` - Get tag hierarchy with usage statistics
 //! - `tarn_create_note` - Create a new note (fails if already exists)
 //! - `tarn_update_note` - Update an existing note with revision-based conflict detection
@@ -37,20 +35,19 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use tarn::{TarnBuilder, TarnMcpServer};
+//! use tarn::{TarnConfig, TarnMcpServer};
+//! use tarn::common::Buildable;
 //!
-//! let core = TarnBuilder::new("/path/to/vault")
-//!     .with_in_memory_index()
-//!     .await?
-//!     .build()
-//!     .await?;
+//! let core = TarnConfig::local("/path/to/vault".into()).build()?;
 //!
 //! let server = TarnMcpServer::new(Arc::new(core));
 //! // Use with rmcp transport (stdio, HTTP, etc.)
 //! ```
 
+pub mod helpers;
 mod prompts;
 mod resources;
+pub mod responses;
 mod tools;
 
 use std::sync::Arc;
@@ -60,7 +57,10 @@ use rmcp::{
     service::RequestContext, tool_handler,
 };
 
-use crate::core::builder::TarnCore;
+use crate::core::tarn_core::TarnCore;
+use crate::index::Index;
+use crate::observer::Observer;
+use crate::storage::Storage;
 
 /// MCP server exposing Tarn vault operations.
 ///
@@ -68,23 +68,38 @@ use crate::core::builder::TarnCore;
 /// and prompts for AI agent integration. The server is clone-cheap (uses `Arc`
 /// internally) and can be shared across multiple transport connections.
 #[derive(Clone)]
-pub struct TarnMcpServer {
-    core: Arc<TarnCore>,
+pub struct TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
+    core: Arc<TarnCore<S, I, O>>,
     tool_router: ToolRouter<Self>,
 }
 
-impl TarnMcpServer {
+impl<S, I, O> TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     /// Create a new MCP server wrapping the given core.
     ///
     /// The core should be fully initialized (index rebuilt if using indexing).
-    pub fn new(core: Arc<TarnCore>) -> Self {
+    pub fn new(core: Arc<TarnCore<S, I, O>>) -> Self {
         let tool_router = Self::tool_router();
         Self { core, tool_router }
     }
 }
 
 #[tool_handler]
-impl ServerHandler for TarnMcpServer {
+impl<S, I, O> ServerHandler for TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()

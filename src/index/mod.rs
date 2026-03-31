@@ -3,16 +3,19 @@
 //! The index enables fast queries by AI agents without re-parsing notes on every operation.
 //! It supports multiple backends: InMemoryStore, SqliteStore, DynamoDbStore, PostgresStore.
 
+pub mod config;
 pub mod in_memory;
 
+pub use config::{IndexBuildError, IndexConfig, default_persistence_path};
 pub use in_memory::InMemoryIndex;
+
+use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::note_handler::Note;
-use std::path::PathBuf;
 
 use crate::tokenizer::TokenizerConfig;
 
@@ -76,8 +79,8 @@ pub struct SectionEntry {
     pub tags: Vec<String>,
     /// Links found in this section.
     pub links: Vec<IndexLink>,
-    /// Word count of the section content.
-    pub word_count: usize,
+    /// Token count of the section content.
+    pub token_count: usize,
     /// Revision token for change detection.
     pub revision: RevisionToken,
 }
@@ -120,21 +123,6 @@ pub enum IndexError {
 }
 
 // ---------------------------------------------------------------------------
-// Index config
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IndexConfig {
-    InMemory {
-        #[serde(default)]
-        tokenizer: TokenizerConfig,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        persistence_path: Option<PathBuf>,
-    },
-}
-
-// ---------------------------------------------------------------------------
 // Index trait
 // ---------------------------------------------------------------------------
 
@@ -153,23 +141,25 @@ pub enum IndexConfig {
 ///   enable precise section targeting.
 /// - **BM25 keyword search**: The `search` method supports relevance-ranked results.
 /// - **Graph queries**: Backlinks and forward links enable knowledge graph traversal.
-#[allow(async_fn_in_trait)]
 pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
     // -------------------------------------------------------------------------
     // CRUD operations
     // -------------------------------------------------------------------------
 
     /// Get all indexed sections for a note.
-    async fn get(&self, path: &VaultPath) -> Result<Vec<SectionEntry>, IndexError>;
+    fn get(
+        &self,
+        path: &VaultPath,
+    ) -> impl Future<Output = Result<Vec<SectionEntry>, IndexError>> + Send;
 
     /// Update the index with a note's sections.
     ///
     /// Extracts all sections from the note and replaces any existing entries
     /// for that note path.
-    async fn update(&self, note: &Note) -> Result<(), IndexError>;
+    fn update(&self, note: &Note) -> impl Future<Output = Result<(), IndexError>> + Send;
 
     /// Remove all indexed sections for a note.
-    async fn remove(&self, path: &VaultPath) -> Result<(), IndexError>;
+    fn remove(&self, path: &VaultPath) -> impl Future<Output = Result<(), IndexError>> + Send;
 
     // -------------------------------------------------------------------------
     // Search operations
@@ -178,21 +168,21 @@ pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
     /// Search for sections matching a query string.
     ///
     /// Returns sections with BM25 relevance scores, filtered by `SearchParams`.
-    async fn search(
+    fn search(
         &self,
         query: &str,
         params: SearchParams,
-    ) -> Result<Vec<(SectionEntry, f32)>, IndexError>;
+    ) -> impl Future<Output = Result<Vec<(SectionEntry, f32)>, IndexError>> + Send;
 
     /// List all sections, optionally filtered by folder.
     ///
     /// If `recursive` is true, includes sections from all notes under the folder.
     /// If false, only includes sections from notes directly in the folder.
-    async fn list(
+    fn list(
         &self,
         folder: Option<&VaultPath>,
         recursive: bool,
-    ) -> Result<Vec<SectionEntry>, IndexError>;
+    ) -> impl Future<Output = Result<Vec<SectionEntry>, IndexError>> + Send;
 
     // -------------------------------------------------------------------------
     // Graph queries
@@ -201,36 +191,62 @@ pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
     /// Find all sections that link to the given target.
     ///
     /// The `target` is matched against wiki link targets (e.g., `[[target]]`).
-    async fn backlinks(&self, target: &str) -> Result<Vec<SectionEntry>, IndexError>;
+    fn backlinks(
+        &self,
+        target: &str,
+    ) -> impl Future<Output = Result<Vec<SectionEntry>, IndexError>> + Send;
 
     /// Get all links from sections of a note.
-    async fn forward_links(&self, path: &VaultPath) -> Result<Vec<IndexLink>, IndexError>;
+    fn forward_links(
+        &self,
+        path: &VaultPath,
+    ) -> impl Future<Output = Result<Vec<IndexLink>, IndexError>> + Send;
 
     // -------------------------------------------------------------------------
     // Metadata operations
     // -------------------------------------------------------------------------
 
     /// Get index metadata.
-    async fn meta(&self) -> Result<IndexMeta, IndexError>;
+    fn meta(&self) -> impl Future<Output = Result<IndexMeta, IndexError>> + Send;
 
     /// Update index metadata.
-    async fn set_meta(&self, meta: IndexMeta) -> Result<(), IndexError>;
+    fn set_meta(&self, meta: IndexMeta) -> impl Future<Output = Result<(), IndexError>> + Send;
 
     // -------------------------------------------------------------------------
     // Bulk operations
     // -------------------------------------------------------------------------
 
     /// Clear all indexed data.
-    async fn clear(&self) -> Result<(), IndexError>;
+    fn clear(&self) -> impl Future<Output = Result<(), IndexError>> + Send;
 
     /// Count the total number of indexed sections.
-    async fn count(&self) -> Result<usize, IndexError>;
+    fn count(&self) -> impl Future<Output = Result<usize, IndexError>> + Send;
 
     /// Update the index with multiple notes.
     ///
     /// More efficient than calling `update` repeatedly for bulk operations.
-    async fn update_bulk(&self, notes: &[Note]) -> Result<(), IndexError>;
+    fn update_bulk(&self, notes: &[Note]) -> impl Future<Output = Result<(), IndexError>> + Send;
 
     /// Remove indexed sections for multiple notes.
-    async fn remove_bulk(&self, paths: &[VaultPath]) -> Result<(), IndexError>;
+    fn remove_bulk(
+        &self,
+        paths: &[VaultPath],
+    ) -> impl Future<Output = Result<(), IndexError>> + Send;
+}
+
+/// Find direct children of a parent tag in a tag hierarchy.
+///
+/// A child tag is one level deeper than `parent` (e.g., `parent/child` but not
+/// `parent/child/grandchild`).
+pub fn find_direct_children(parent: &str, all_tags: &[String]) -> Vec<String> {
+    all_tags
+        .iter()
+        .filter(|other| {
+            other.starts_with(parent)
+                && other.len() > parent.len()
+                && other.as_bytes().get(parent.len()) == Some(&b'/')
+                && !other[parent.len() + 1..].contains('/')
+        })
+        .cloned()
+        .collect()
 }

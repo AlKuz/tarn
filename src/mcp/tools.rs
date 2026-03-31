@@ -1,35 +1,15 @@
+use regex::RegexBuilder;
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use schemars::JsonSchema;
 
 use super::TarnMcpServer;
-use crate::common::{RevisionToken, VaultPath};
-use crate::core::tarn_core::ReplaceMode;
-
-fn parse_folder(folder: Option<String>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
-    folder
-        .map(|f| {
-            let normalized = format!("{}/", f.trim_end_matches('/'));
-            VaultPath::new(normalized)
-                .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))
-        })
-        .transpose()
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct ReadNoteParams {
-    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
-    pub path: String,
-    #[schemars(description = "Return only these section headings (fragment retrieval)")]
-    pub sections: Option<Vec<String>>,
-    #[schemars(description = "Include parsed frontmatter (default: true)")]
-    pub include_frontmatter: Option<bool>,
-    #[schemars(description = "Include extracted links (default: false)")]
-    pub include_links: Option<bool>,
-    #[schemars(
-        description = "Return heading outline + word counts instead of full content (default: false)"
-    )]
-    pub summary: Option<bool>,
-}
+use super::helpers::parse_folder;
+use super::responses::{SearchResponse, SearchResult, WriteNoteResponse};
+use crate::common::RevisionToken;
+use crate::core::responses::{ReplaceMode, SearchOptions};
+use crate::index::Index;
+use crate::observer::Observer;
+use crate::storage::Storage;
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct SearchNotesParams {
@@ -40,22 +20,6 @@ pub struct SearchNotesParams {
     #[schemars(description = "Notes must have all these tags")]
     pub tag_filter: Option<Vec<String>>,
     #[schemars(description = "Max results (default: 20)")]
-    pub limit: Option<usize>,
-    #[schemars(description = "Pagination offset")]
-    pub offset: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct ListNotesParams {
-    #[schemars(description = "Folder path (default: root)")]
-    pub folder: Option<String>,
-    #[schemars(description = "Include subfolders (default: false)")]
-    pub recursive: Option<bool>,
-    #[schemars(description = "Filter by tags")]
-    pub tag_filter: Option<Vec<String>>,
-    #[schemars(description = "Sort order: \"title\" (default)")]
-    pub sort: Option<String>,
-    #[schemars(description = "Max results (default: 50)")]
     pub limit: Option<usize>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<usize>,
@@ -101,104 +65,70 @@ pub struct ReplaceInNoteParams {
     pub revision: String,
 }
 
+fn tool_success(response: &impl serde::Serialize) -> Result<CallToolResult, rmcp::ErrorData> {
+    let json = serde_json::to_string_pretty(response)
+        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+        json,
+    )]))
+}
+
+fn tool_error(e: impl std::fmt::Display) -> Result<CallToolResult, rmcp::ErrorData> {
+    Ok(CallToolResult::error(vec![rmcp::model::Content::text(
+        e.to_string(),
+    )]))
+}
+
 #[tool_router(vis = "pub(crate)")]
-impl TarnMcpServer {
+impl<S, I, O> TarnMcpServer<S, I, O>
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+{
     #[tool(
-        description = "Read note content with control over detail level. Supports fragment retrieval by section headings and summary mode (heading outline + word counts)."
-    )]
-    async fn tarn_read_note(
-        &self,
-        Parameters(params): Parameters<ReadNoteParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let result = self
-            .core
-            .read_note(
-                &params.path,
-                params.sections.as_deref(),
-                params.include_frontmatter.unwrap_or(true),
-                params.include_links.unwrap_or(false),
-                params.summary.unwrap_or(false),
-            )
-            .await;
-
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
-        }
-    }
-
-    #[tool(
-        description = "Search across the vault using case-insensitive text matching. Returns matching notes with snippets showing context around matches."
+        description = "Search across the vault using full-text matching. Returns matching notes with metadata."
     )]
     async fn tarn_search_notes(
         &self,
         Parameters(params): Parameters<SearchNotesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let folder = parse_folder(params.folder)?;
-        let result = self
-            .core
-            .search_notes(
-                &params.query,
-                folder.as_ref(),
-                params.tag_filter.as_deref(),
-                params.limit.unwrap_or(20),
-                params.offset.unwrap_or(0),
-            )
-            .await;
+        let folder = parse_folder(params.folder.as_deref())?;
+        let limit = params.limit.unwrap_or(20);
+        let offset = params.offset.unwrap_or(0);
 
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
+        let options = SearchOptions {
+            folder,
+            tags: params.tag_filter,
+            limit,
+            offset,
+        };
+
+        match self.core.search(&params.query, options).await {
+            Ok(core_response) => {
+                let mut results = Vec::new();
+                for hit in &core_response.hits {
+                    let path_str = hit.path.to_string();
+                    match self.core.read(&path_str).await {
+                        Ok((note, _)) => {
+                            let tags: Vec<String> =
+                                note.tags().into_iter().map(String::from).collect();
+                            results.push(SearchResult {
+                                path: path_str,
+                                title: note.title.clone(),
+                                tags,
+                            });
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                let response = SearchResponse {
+                    total: core_response.total,
+                    results,
+                };
+                tool_success(&response)
             }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
-        }
-    }
-
-    #[tool(
-        description = "List notes in a folder with optional filtering by tags. Supports pagination and sorting."
-    )]
-    async fn tarn_list_notes(
-        &self,
-        Parameters(params): Parameters<ListNotesParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let folder = parse_folder(params.folder)?;
-        let result = self
-            .core
-            .list_notes(
-                folder.as_ref(),
-                params.recursive.unwrap_or(false),
-                params.tag_filter.as_deref(),
-                params.sort.as_deref(),
-                params.limit.unwrap_or(50),
-                params.offset.unwrap_or(0),
-            )
-            .await;
-
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
-            }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
+            Err(e) => tool_error(e),
         }
     }
 
@@ -209,25 +139,27 @@ impl TarnMcpServer {
         &self,
         Parameters(params): Parameters<GetTagsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let result = self
-            .core
-            .get_tags(
-                params.prefix.as_deref(),
-                params.include_notes.unwrap_or(false),
-            )
-            .await;
+        let include_notes = params.include_notes.unwrap_or(false);
 
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
+        match self.core.tags(params.prefix.as_deref(), None).await {
+            Ok(entries) => {
+                let tags: Vec<super::responses::TagInfo> = entries
+                    .into_iter()
+                    .map(|e| super::responses::TagInfo {
+                        tag: e.tag,
+                        count: e.count,
+                        children: e.children,
+                        notes: if include_notes {
+                            Some(e.note_paths.into_iter().map(|p| p.to_string()).collect())
+                        } else {
+                            None
+                        },
+                    })
+                    .collect();
+                let response = super::responses::GetTagsResponse { tags };
+                tool_success(&response)
             }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
+            Err(e) => tool_error(e),
         }
     }
 
@@ -236,19 +168,15 @@ impl TarnMcpServer {
         &self,
         Parameters(params): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let result = self.core.create_note(&params.path, &params.content).await;
-
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
+        match self.core.write(&params.path, &params.content, None).await {
+            Ok(revision) => {
+                let response = WriteNoteResponse {
+                    path: params.path,
+                    revision,
+                };
+                tool_success(&response)
             }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
+            Err(e) => tool_error(e),
         }
     }
 
@@ -260,22 +188,19 @@ impl TarnMcpServer {
         Parameters(params): Parameters<UpdateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let revision: RevisionToken = params.revision.into();
-        let result = self
+        match self
             .core
-            .update_note(&params.path, &params.content, revision)
-            .await;
-
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
+            .write(&params.path, &params.content, Some(revision))
+            .await
+        {
+            Ok(new_revision) => {
+                let response = WriteNoteResponse {
+                    path: params.path,
+                    revision: new_revision,
+                };
+                tool_success(&response)
             }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
+            Err(e) => tool_error(e),
         }
     }
 
@@ -291,29 +216,47 @@ impl TarnMcpServer {
             Some("regex") => ReplaceMode::Regex,
             Some("first") | None => ReplaceMode::First,
             Some(other) => {
-                return Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                    format!("invalid mode: {other} (expected: first, all, or regex)"),
-                )]));
+                return tool_error(format!(
+                    "invalid mode: {other} (expected: first, all, or regex)"
+                ));
             }
         };
 
         let revision: RevisionToken = params.revision.into();
-        let result = self
-            .core
-            .replace_in_note(&params.path, &params.old, &params.new, mode, revision)
-            .await;
 
-        match result {
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-                    json,
-                )]))
+        // Read current content
+        let (note, _) = match self.core.read(&params.path).await {
+            Ok(result) => result,
+            Err(e) => return tool_error(e),
+        };
+
+        // Apply replacement
+        let current_content = note.to_string();
+        let new_content = match mode {
+            ReplaceMode::First => current_content.replacen(&params.old, &params.new, 1),
+            ReplaceMode::All => current_content.replace(&params.old, &params.new),
+            ReplaceMode::Regex => {
+                match RegexBuilder::new(&params.old).size_limit(1_000_000).build() {
+                    Ok(re) => re.replace_all(&current_content, &*params.new).into_owned(),
+                    Err(e) => return tool_error(format!("invalid regex: {e}")),
+                }
             }
-            Err(e) => Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-                e.to_string(),
-            )])),
+        };
+
+        // Write back with user's revision for conflict detection
+        match self
+            .core
+            .write(&params.path, &new_content, Some(revision))
+            .await
+        {
+            Ok(new_revision) => {
+                let response = WriteNoteResponse {
+                    path: params.path,
+                    revision: new_revision,
+                };
+                tool_success(&response)
+            }
+            Err(e) => tool_error(e),
         }
     }
 }

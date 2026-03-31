@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "tarn"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2264,6 +2264,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "dirs",
  "futures-core",
  "lingua",
  "notify",
