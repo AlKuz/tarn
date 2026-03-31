@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/AlKuz/tarn/compare/v0.5.2...v0.6.0) (2026-03-31)
+
+
+### Features
+
+* section level resource ([#31](https://github.com/AlKuz/tarn/issues/31)) ([7fbb072](https://github.com/AlKuz/tarn/commit/7fbb072fbae6c89a19ba20c0c2db3c55289bd6da))
+
 ## [0.5.2](https://github.com/AlKuz/tarn/compare/v0.5.1...v0.5.2) (2026-03-27)
 
 
