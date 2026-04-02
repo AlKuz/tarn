@@ -9,6 +9,7 @@ pub mod config;
 #[cfg(feature = "hf-tokenizer")]
 mod hf;
 mod naive;
+pub mod ngram;
 #[cfg(feature = "stemming")]
 mod stemming;
 
@@ -16,6 +17,7 @@ pub use config::{TokenizerConfig, TokenizerError};
 #[cfg(feature = "hf-tokenizer")]
 pub use hf::HfTokenizer;
 pub use naive::NaiveTokenizer;
+pub use ngram::{NgramTokenizer, NgramTokenizerConfig};
 #[cfg(feature = "stemming")]
 pub use stemming::StemmingTokenizer;
 

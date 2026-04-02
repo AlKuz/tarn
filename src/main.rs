@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use tarn::TarnConfig;
 use tarn::common::Buildable;
-use tarn::index::IndexConfig;
+use tarn::index::{InMemoryIndexConfig, IndexConfig};
 use tarn::mcp::TarnMcpServer;
 
 #[derive(Clone, ValueEnum)]
@@ -116,10 +116,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Override index persistence path if specified
     if let Some(index_path) = cli.index_path {
-        config = config.with_index(IndexConfig::InMemory {
-            tokenizer: Default::default(),
+        config = config.with_index(IndexConfig::InMemory(InMemoryIndexConfig {
             persistence_path: Some(index_path),
-        });
+            ..Default::default()
+        }));
     }
 
     let core = Arc::new(config.build()?);

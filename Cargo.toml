@@ -30,7 +30,7 @@ rust-stemmers = { version = "~1.2", optional = true }
 lingua = { version = "~1.8", default-features = false, features = ["english", "french", "german", "spanish", "italian", "portuguese", "dutch", "russian"], optional = true }
 
 [features]
-default = []
+default = ["stemming"]
 hf-tokenizer = ["dep:tokenizers"]
 stemming = ["dep:rust-stemmers", "dep:lingua"]
 
