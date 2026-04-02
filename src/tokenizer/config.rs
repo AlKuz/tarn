@@ -1,16 +1,8 @@
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
+use super::errors::TokenizerError;
 use crate::common::Buildable;
 use crate::tokenizer::Tokenizer;
-
-#[derive(Debug, Error)]
-pub enum TokenizerError {
-    #[error("feature '{0}' is not enabled")]
-    FeatureNotEnabled(String),
-    #[error("failed to load tokenizer: {0}")]
-    LoadFailed(String),
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -21,6 +13,16 @@ pub enum TokenizerConfig {
     HuggingFace { model_id: String },
     /// Language-aware stemming tokenizer (requires `stemming` feature).
     Stemming,
+    /// Character n-gram tokenizer for trigram similarity scoring.
+    Ngram {
+        /// Size of character n-grams (default: 3).
+        #[serde(default = "default_ngram_n")]
+        n: usize,
+    },
+}
+
+fn default_ngram_n() -> usize {
+    3
 }
 
 impl Buildable for TokenizerConfig {
@@ -49,6 +51,10 @@ impl Buildable for TokenizerConfig {
             #[cfg(not(feature = "stemming"))]
             TokenizerConfig::Stemming => {
                 Err(TokenizerError::FeatureNotEnabled("stemming".to_string()))
+            }
+            TokenizerConfig::Ngram { n } => {
+                let tokenizer = crate::tokenizer::NgramTokenizer::new(*n)?;
+                Ok(Box::new(tokenizer))
             }
         }
     }

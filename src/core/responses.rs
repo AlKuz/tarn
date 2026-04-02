@@ -2,37 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::VaultPath;
 
-/// Options for search queries.
-#[derive(Debug, Clone, Default)]
-pub struct SearchOptions {
-    /// Limit results to notes under this folder.
-    pub folder: Option<VaultPath>,
-    /// Limit results to notes with all of these tags.
-    pub tags: Option<Vec<String>>,
-    /// Maximum number of results to return.
-    pub limit: usize,
-    /// Number of results to skip (for pagination).
-    pub offset: usize,
-}
-
-/// A single search hit from the index.
+/// A single section hit from search.
 #[derive(Debug, Clone, Serialize)]
-pub struct SearchHit {
-    /// Path to the matching note.
+pub struct SectionHit {
+    /// Section path (e.g., `note.md#Goals/Q1`).
     pub path: VaultPath,
-    /// BM25 relevance score.
+    /// RRF score from fused pipelines.
     pub score: f32,
-    /// Heading paths of matching sections.
-    pub sections: Vec<Vec<String>>,
-}
-
-/// Search response with hits and total count.
-#[derive(Debug, Serialize)]
-pub struct CoreSearchResponse {
-    /// Matching notes (deduplicated from sections).
-    pub hits: Vec<SearchHit>,
-    /// Total number of matching notes (before pagination).
-    pub total: usize,
+    /// Token count of the section content.
+    pub token_count: usize,
 }
 
 /// A tag entry with count, children, and associated note paths.

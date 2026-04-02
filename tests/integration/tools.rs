@@ -85,10 +85,10 @@ async fn search_by_tag_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn search_pagination() {
+async fn search_limit() {
     let server = spawn_server(false).await;
 
-    // Use a broad query that matches many notes for pagination testing
+    // Use a broad query that matches many notes
     let all = call_tool(
         &server.client,
         "tarn_search_notes",
@@ -96,24 +96,17 @@ async fn search_pagination() {
     )
     .await;
     let total = all["total"].as_u64().unwrap();
-    assert!(total >= 3, "need at least 3 results for pagination test");
+    assert!(total >= 3, "need at least 3 results for limit test");
 
-    let page1 = call_tool(
+    // Limit to 2 results
+    let limited = call_tool(
         &server.client,
         "tarn_search_notes",
-        json!({"query": "project", "limit": 2, "offset": 0}),
-    )
-    .await;
-    let page2 = call_tool(
-        &server.client,
-        "tarn_search_notes",
-        json!({"query": "project", "limit": 2, "offset": 2}),
+        json!({"query": "project", "limit": 2}),
     )
     .await;
 
-    assert_eq!(page1["total"].as_u64().unwrap(), total);
-    assert_eq!(page2["total"].as_u64().unwrap(), total);
-    assert_eq!(page1["results"].as_array().unwrap().len(), 2);
+    assert_eq!(limited["results"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

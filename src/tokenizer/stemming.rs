@@ -2,12 +2,10 @@
 
 use std::collections::HashMap;
 
-use lingua::{Language, LanguageDetector, LanguageDetectorBuilder};
-use rust_stemmers::{Algorithm, Stemmer};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use super::{Tokenizer, TokenizerConfig};
 use crate::common::Configurable;
+use lingua::{Language, LanguageDetector, LanguageDetectorBuilder};
+use rust_stemmers::{Algorithm, Stemmer};
 
 /// Language-aware stemming tokenizer.
 ///
@@ -22,6 +20,12 @@ pub struct StemmingTokenizer {
 impl std::fmt::Debug for StemmingTokenizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StemmingTokenizer").finish()
+    }
+}
+
+impl Default for StemmingTokenizer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

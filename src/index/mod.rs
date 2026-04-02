@@ -6,7 +6,7 @@
 pub mod config;
 pub mod in_memory;
 
-pub use config::{IndexBuildError, IndexConfig, default_persistence_path};
+pub use config::{InMemoryIndexConfig, IndexBuildError, IndexConfig, default_persistence_path};
 pub use in_memory::InMemoryIndex;
 
 use std::future::Future;
@@ -14,10 +14,8 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::common::{Configurable, RevisionToken, VaultPath};
+use crate::common::{RevisionToken, VaultPath};
 use crate::note_handler::Note;
-
-use crate::tokenizer::TokenizerConfig;
 
 // ---------------------------------------------------------------------------
 // Search parameters
@@ -26,14 +24,14 @@ use crate::tokenizer::TokenizerConfig;
 /// Parameters for search queries.
 #[derive(Debug, Clone, Default)]
 pub struct SearchParams {
-    /// Limit results to notes under this folder.
-    pub folder: Option<VaultPath>,
-    /// Limit results to notes with any of these tags.
-    pub tags: Option<Vec<String>>,
-    /// Maximum number of results to return.
+    /// Hard filter: limit results to notes under these folders.
+    /// Empty means no folder filter.
+    pub folders: Vec<VaultPath>,
+    /// Hard filter: limit results to sections with at least one of these tags.
+    /// Empty means no tag filter.
+    pub tags: Vec<String>,
+    /// Maximum number of section results to return.
     pub limit: usize,
-    /// Number of results to skip (for pagination).
-    pub offset: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,23 +61,20 @@ pub enum IndexLink {
 // Section entry
 // ---------------------------------------------------------------------------
 
-/// An indexed section from a note.
+/// An indexed entry keyed by `VaultPath`.
 ///
-/// The index is section-based - each indexed unit is a section delimited by headings.
-/// This enables token-optimized retrieval for AI agents.
+/// Currently every entry corresponds to a note section, but the struct is
+/// intentionally generic so the index can store other content types in the
+/// future.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SectionEntry {
-    /// Path to the note containing this section.
-    pub note_path: VaultPath,
-    /// Full heading path from root to this section.
-    /// Example: `["Project Alpha", "Goals", "Q1"]` for `## Goals` under `# Project Alpha`.
-    pub heading_path: Vec<String>,
-    /// Tags attached to this section.
-    /// Includes note frontmatter tags (attached to ALL sections) and inline tags.
+pub struct IndexEntry {
+    /// Full path to this indexed entry (e.g., `note.md#Goals/Q1`).
+    pub path: VaultPath,
+    /// Tags attached to this entry.
     pub tags: Vec<String>,
-    /// Links found in this section.
+    /// Links found in this entry.
     pub links: Vec<IndexLink>,
-    /// Token count of the section content.
+    /// Token count of the entry content.
     pub token_count: usize,
     /// Revision token for change detection.
     pub revision: RevisionToken,
@@ -96,9 +91,6 @@ pub struct IndexMeta {
     pub note_count: usize,
     /// Timestamp of last indexing operation.
     pub last_indexed: Option<chrono::DateTime<chrono::Utc>>,
-    /// Tokenizer configuration used for this index.
-    #[serde(default)]
-    pub tokenizer_config: TokenizerConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +133,7 @@ pub enum IndexError {
 ///   enable precise section targeting.
 /// - **BM25 keyword search**: The `search` method supports relevance-ranked results.
 /// - **Graph queries**: Backlinks and forward links enable knowledge graph traversal.
-pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
+pub trait Index: Send + Sync {
     // -------------------------------------------------------------------------
     // CRUD operations
     // -------------------------------------------------------------------------
@@ -150,7 +142,7 @@ pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
     fn get(
         &self,
         path: &VaultPath,
-    ) -> impl Future<Output = Result<Vec<SectionEntry>, IndexError>> + Send;
+    ) -> impl Future<Output = Result<Vec<IndexEntry>, IndexError>> + Send;
 
     /// Update the index with a note's sections.
     ///
@@ -172,7 +164,7 @@ pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
         &self,
         query: &str,
         params: SearchParams,
-    ) -> impl Future<Output = Result<Vec<(SectionEntry, f32)>, IndexError>> + Send;
+    ) -> impl Future<Output = Result<Vec<(IndexEntry, f32)>, IndexError>> + Send;
 
     /// List all sections, optionally filtered by folder.
     ///
@@ -182,7 +174,7 @@ pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
         &self,
         folder: Option<&VaultPath>,
         recursive: bool,
-    ) -> impl Future<Output = Result<Vec<SectionEntry>, IndexError>> + Send;
+    ) -> impl Future<Output = Result<Vec<IndexEntry>, IndexError>> + Send;
 
     // -------------------------------------------------------------------------
     // Graph queries
@@ -194,7 +186,7 @@ pub trait Index: Send + Sync + Configurable<Config = IndexConfig> {
     fn backlinks(
         &self,
         target: &str,
-    ) -> impl Future<Output = Result<Vec<SectionEntry>, IndexError>> + Send;
+    ) -> impl Future<Output = Result<Vec<IndexEntry>, IndexError>> + Send;
 
     /// Get all links from sections of a note.
     fn forward_links(

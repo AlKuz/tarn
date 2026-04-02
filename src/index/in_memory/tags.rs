@@ -1,31 +1,87 @@
-//! Tag-based inverted index for fast tag queries.
+//! Tag-based inverted index with trigram similarity scoring.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::common::VaultPath;
+use crate::common::{Buildable, Configurable, VaultPath};
+use crate::tokenizer::{NgramTokenizer, TokenizerError};
 
-/// Inverted index for tag-based filtering.
+/// Errors from tag index construction.
+#[derive(Debug, Error)]
+pub enum TagIndexError {
+    #[error(transparent)]
+    Tokenizer(#[from] TokenizerError),
+}
+
+use super::scorer::Scorer;
+
+/// Default n-gram size for tag trigrams.
+const DEFAULT_N: usize = 3;
+const DEFAULT_THRESHOLD: f32 = 0.0;
+
+/// Configuration for the tag index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TagIndexConfig {
+    /// N-gram size for trigram scoring (default: 3).
+    #[serde(default = "default_n")]
+    pub n: usize,
+    /// Minimum Jaccard similarity to include in results (default: 0.0).
+    #[serde(default)]
+    pub threshold: f32,
+}
+
+fn default_n() -> usize {
+    DEFAULT_N
+}
+
+impl Default for TagIndexConfig {
+    fn default() -> Self {
+        Self {
+            n: DEFAULT_N,
+            threshold: DEFAULT_THRESHOLD,
+        }
+    }
+}
+
+impl Buildable for TagIndexConfig {
+    type Target = TagIndex;
+    type Error = TagIndexError;
+
+    fn build(&self) -> Result<Self::Target, Self::Error> {
+        Ok(TagIndex {
+            ngram_tokenizer: NgramTokenizer::new(self.n)?,
+            threshold: self.threshold,
+            index: HashMap::new(),
+            reverse: HashMap::new(),
+            section_trigrams: HashMap::new(),
+        })
+    }
+}
+
+/// Inverted index for tag-based filtering and trigram similarity scoring.
 ///
-/// Maintains bidirectional mappings:
-/// - tag -> sections (for filtering by tag)
-/// - section -> tags (for efficient removal)
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Maintains bidirectional mappings for boolean filtering and precomputed
+/// trigrams for Jaccard similarity scoring. Implements `Scorer` for
+/// integration with RRF fusion.
 pub struct TagIndex {
+    /// Internal n-gram tokenizer for trigram computation.
+    ngram_tokenizer: NgramTokenizer,
+    /// Minimum similarity threshold.
+    threshold: f32,
     /// tag -> set of section paths
     index: HashMap<String, HashSet<VaultPath>>,
     /// section_path -> tags (for efficient removal)
     reverse: HashMap<VaultPath, HashSet<String>>,
+    /// section_path -> precomputed trigrams from concatenated tags
+    section_trigrams: HashMap<VaultPath, HashSet<String>>,
 }
 
 impl TagIndex {
-    /// Create a new empty tag index.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Add tags for a section.
+    ///
+    /// Also precomputes trigrams from the concatenated tag names.
     pub fn add(&mut self, section_path: VaultPath, tags: &[String]) {
         let tag_set: HashSet<String> = tags.iter().cloned().collect();
 
@@ -34,6 +90,17 @@ impl TagIndex {
                 .entry(tag.clone())
                 .or_default()
                 .insert(section_path.clone());
+        }
+
+        // Precompute trigrams from concatenated tags
+        if !tags.is_empty() {
+            let concatenated = tags.join(" ");
+            let trigrams: HashSet<String> = self
+                .ngram_tokenizer
+                .tokenize(&concatenated)
+                .into_iter()
+                .collect();
+            self.section_trigrams.insert(section_path.clone(), trigrams);
         }
 
         self.reverse.insert(section_path, tag_set);
@@ -51,6 +118,7 @@ impl TagIndex {
                 }
             }
         }
+        self.section_trigrams.remove(section_path);
     }
 
     /// Filter sections by tag criteria.
@@ -97,11 +165,101 @@ impl TagIndex {
     pub fn clear(&mut self) {
         self.index.clear();
         self.reverse.clear();
+        self.section_trigrams.clear();
+    }
+
+    /// Expand filter tags to include hierarchical children.
+    ///
+    /// For each filter tag, finds all tags in the index that are direct or nested
+    /// children (e.g., `"project"` expands to include `"project/alpha"`,
+    /// `"project/alpha/v2"`). O(unique_tags) instead of O(sections × tags).
+    pub fn expand_hierarchical(&self, filter_tags: &[String]) -> HashSet<String> {
+        let mut expanded = HashSet::new();
+        for filter_tag in filter_tags {
+            expanded.insert(filter_tag.clone());
+            for tag in self.index.keys() {
+                if tag.starts_with(filter_tag.as_str())
+                    && tag.len() > filter_tag.len()
+                    && tag.as_bytes().get(filter_tag.len()) == Some(&b'/')
+                {
+                    expanded.insert(tag.clone());
+                }
+            }
+        }
+        expanded
     }
 
     /// Get all tags for a section.
     pub fn tags_for_section(&self, section_path: &VaultPath) -> Option<&HashSet<String>> {
         self.reverse.get(section_path)
+    }
+}
+
+impl Scorer for TagIndex {
+    /// Score candidate sections by Jaccard similarity between query trigrams
+    /// and section tag trigrams.
+    fn score(&self, query: &str, candidates: &HashSet<VaultPath>) -> Vec<(VaultPath, f32)> {
+        if query.is_empty() || candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let query_trigrams: HashSet<String> =
+            self.ngram_tokenizer.tokenize(query).into_iter().collect();
+
+        if query_trigrams.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results: Vec<(VaultPath, f32)> = candidates
+            .iter()
+            .filter_map(|path| {
+                let section_trigrams = self.section_trigrams.get(path)?;
+                if section_trigrams.is_empty() {
+                    return None;
+                }
+
+                let intersection = query_trigrams.intersection(section_trigrams).count();
+                if intersection == 0 {
+                    return None;
+                }
+
+                let union = query_trigrams.union(section_trigrams).count();
+                let jaccard = intersection as f32 / union as f32;
+
+                if jaccard > self.threshold {
+                    Some((path.clone(), jaccard))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+}
+
+impl Configurable for TagIndex {
+    type Config = TagIndexConfig;
+
+    fn config(&self) -> Self::Config {
+        let n = match self.ngram_tokenizer.config() {
+            crate::tokenizer::TokenizerConfig::Ngram { n } => n,
+            _ => DEFAULT_N,
+        };
+        TagIndexConfig {
+            n,
+            threshold: self.threshold,
+        }
+    }
+}
+
+impl std::fmt::Debug for TagIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TagIndex")
+            .field("tag_count", &self.index.len())
+            .field("section_count", &self.reverse.len())
+            .finish()
     }
 }
 
@@ -114,9 +272,15 @@ mod tests {
         VaultPath::new(format!("{path}#{heading_path}")).unwrap()
     }
 
+    fn make_index() -> TagIndex {
+        TagIndexConfig::default().build().unwrap()
+    }
+
+    // --- Boolean filtering tests (existing) ---
+
     #[test]
     fn add_and_filter_by_include() {
-        let mut index = TagIndex::new();
+        let mut index = make_index();
 
         let s1 = section_path("note1.md", &[]);
         let s2 = section_path("note2.md", &[]);
@@ -126,7 +290,6 @@ mod tests {
         index.add(s2.clone(), &["rust".into(), "web".into()]);
         index.add(s3.clone(), &["python".into()]);
 
-        // Filter by rust tag
         let rust_tags: HashSet<String> = ["rust".into()].into();
         let result = index.filter(Some(&rust_tags), None);
         assert!(result.contains(&s1));
@@ -136,7 +299,7 @@ mod tests {
 
     #[test]
     fn filter_by_exclude() {
-        let mut index = TagIndex::new();
+        let mut index = make_index();
 
         let s1 = section_path("note1.md", &[]);
         let s2 = section_path("note2.md", &[]);
@@ -144,7 +307,6 @@ mod tests {
         index.add(s1.clone(), &["rust".into(), "draft".into()]);
         index.add(s2.clone(), &["rust".into()]);
 
-        // Exclude drafts
         let exclude: HashSet<String> = ["draft".into()].into();
         let result = index.filter(None, Some(&exclude));
         assert!(!result.contains(&s1));
@@ -153,7 +315,7 @@ mod tests {
 
     #[test]
     fn filter_include_and_exclude() {
-        let mut index = TagIndex::new();
+        let mut index = make_index();
 
         let s1 = section_path("note1.md", &[]);
         let s2 = section_path("note2.md", &[]);
@@ -163,19 +325,18 @@ mod tests {
         index.add(s2.clone(), &["rust".into(), "draft".into()]);
         index.add(s3.clone(), &["python".into(), "published".into()]);
 
-        // Include rust, exclude draft
         let include: HashSet<String> = ["rust".into()].into();
         let exclude: HashSet<String> = ["draft".into()].into();
         let result = index.filter(Some(&include), Some(&exclude));
 
         assert!(result.contains(&s1));
-        assert!(!result.contains(&s2)); // excluded by draft
-        assert!(!result.contains(&s3)); // not included (no rust)
+        assert!(!result.contains(&s2));
+        assert!(!result.contains(&s3));
     }
 
     #[test]
     fn remove_section() {
-        let mut index = TagIndex::new();
+        let mut index = make_index();
 
         let s1 = section_path("note1.md", &[]);
         index.add(s1.clone(), &["rust".into(), "programming".into()]);
@@ -186,7 +347,6 @@ mod tests {
 
         assert!(index.tags_for_section(&s1).is_none());
 
-        // Rust tag should be cleaned up
         let rust_tags: HashSet<String> = ["rust".into()].into();
         let result = index.filter(Some(&rust_tags), None);
         assert!(result.is_empty());
@@ -194,7 +354,7 @@ mod tests {
 
     #[test]
     fn clear_removes_all() {
-        let mut index = TagIndex::new();
+        let mut index = make_index();
 
         let s1 = section_path("note1.md", &[]);
         index.add(s1.clone(), &["rust".into()]);
@@ -202,11 +362,12 @@ mod tests {
         index.clear();
 
         assert!(index.filter(None, None).is_empty());
+        assert!(index.section_trigrams.is_empty());
     }
 
     #[test]
     fn empty_include_returns_all() {
-        let mut index = TagIndex::new();
+        let mut index = make_index();
 
         let s1 = section_path("note1.md", &[]);
         let s2 = section_path("note2.md", &[]);
@@ -216,5 +377,173 @@ mod tests {
 
         let result = index.filter(None, None);
         assert_eq!(result.len(), 2);
+    }
+
+    // --- Trigram scoring tests ---
+
+    #[test]
+    fn score_exact_tag_match() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1.clone(), &["rust".into()]);
+
+        let candidates: HashSet<VaultPath> = [s1.clone()].into();
+        let results = index.score("rust", &candidates);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, s1);
+        // Exact match should have high Jaccard similarity
+        assert!(results[0].1 > 0.5);
+    }
+
+    #[test]
+    fn score_partial_overlap() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+
+        index.add(s1.clone(), &["rust".into(), "programming".into()]);
+        index.add(s2.clone(), &["python".into(), "scripting".into()]);
+
+        let candidates: HashSet<VaultPath> = [s1.clone(), s2.clone()].into();
+        let results = index.score("rust", &candidates);
+
+        // s1 should score higher (has "rust" tag)
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, s1);
+    }
+
+    #[test]
+    fn score_respects_candidates() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+
+        index.add(s1.clone(), &["rust".into()]);
+        index.add(s2.clone(), &["rust".into()]);
+
+        // Only s2 is a candidate
+        let candidates: HashSet<VaultPath> = [s2.clone()].into();
+        let results = index.score("rust", &candidates);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, s2);
+    }
+
+    #[test]
+    fn score_empty_query_returns_empty() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1.clone(), &["rust".into()]);
+
+        let candidates: HashSet<VaultPath> = [s1].into();
+        assert!(index.score("", &candidates).is_empty());
+    }
+
+    #[test]
+    fn score_empty_candidates_returns_empty() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1, &["rust".into()]);
+
+        let empty: HashSet<VaultPath> = HashSet::new();
+        assert!(index.score("rust", &empty).is_empty());
+    }
+
+    #[test]
+    fn score_no_tags_section_excluded() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        // Add with empty tags — no trigrams generated
+        index.add(s1.clone(), &[]);
+
+        let candidates: HashSet<VaultPath> = [s1].into();
+        assert!(index.score("rust", &candidates).is_empty());
+    }
+
+    #[test]
+    fn threshold_filters_low_scores() {
+        let config = TagIndexConfig {
+            threshold: 0.99, // Very high threshold
+            ..Default::default()
+        };
+        let mut index = config.build().unwrap();
+
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1.clone(), &["rust".into(), "programming".into()]);
+
+        let candidates: HashSet<VaultPath> = [s1].into();
+        // "web" has low overlap with "rust programming"
+        assert!(index.score("web", &candidates).is_empty());
+    }
+
+    #[test]
+    fn config_roundtrip() {
+        let config = TagIndexConfig {
+            n: 4,
+            threshold: 0.1,
+        };
+        let index = config.build().unwrap();
+        assert_eq!(index.config(), config);
+    }
+
+    #[test]
+    fn default_config() {
+        let config = TagIndexConfig::default();
+        assert_eq!(config.n, 3);
+        assert!((config.threshold - 0.0).abs() < f32::EPSILON);
+    }
+
+    // --- Hierarchical expansion tests ---
+
+    #[test]
+    fn expand_hierarchical_finds_children() {
+        let mut index = make_index();
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+        index.add(s1, &["project/alpha".into(), "rust".into()]);
+        index.add(s2, &["project/beta".into()]);
+
+        let expanded = index.expand_hierarchical(&["project".into()]);
+        assert!(expanded.contains("project"));
+        assert!(expanded.contains("project/alpha"));
+        assert!(expanded.contains("project/beta"));
+        assert!(!expanded.contains("rust"));
+    }
+
+    #[test]
+    fn expand_hierarchical_no_false_prefix_match() {
+        let mut index = make_index();
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1, &["project".into(), "projects-old".into()]);
+
+        let expanded = index.expand_hierarchical(&["project".into()]);
+        assert!(expanded.contains("project"));
+        assert!(!expanded.contains("projects-old"));
+    }
+
+    #[test]
+    fn expand_hierarchical_empty_filter() {
+        let index = make_index();
+        let expanded = index.expand_hierarchical(&[]);
+        assert!(expanded.is_empty());
+    }
+
+    #[test]
+    fn remove_cleans_trigrams() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1.clone(), &["rust".into()]);
+        assert!(index.section_trigrams.contains_key(&s1));
+
+        index.remove(&s1);
+        assert!(!index.section_trigrams.contains_key(&s1));
     }
 }

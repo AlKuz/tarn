@@ -6,7 +6,9 @@ use thiserror::Error;
 
 use crate::common::Buildable;
 use crate::index::in_memory::InMemoryIndexError;
-use crate::index::{Index, IndexBuildError, IndexConfig, default_persistence_path};
+use crate::index::{
+    InMemoryIndexConfig, Index, IndexBuildError, IndexConfig, default_persistence_path,
+};
 use crate::observer::{Observer, ObserverConfig};
 use crate::storage::{LocalStorageConfig, Storage, StorageConfig};
 
@@ -68,10 +70,10 @@ impl TarnConfig {
         TarnConfig {
             vault_name,
             storage: StorageConfig::Local(LocalStorageConfig { path }),
-            index: IndexConfig::InMemory {
-                tokenizer: Default::default(),
+            index: IndexConfig::InMemory(InMemoryIndexConfig {
                 persistence_path,
-            },
+                ..Default::default()
+            }),
             observer,
         }
     }
@@ -91,10 +93,10 @@ impl TarnConfig {
         Ok(TarnConfig {
             vault_name,
             storage,
-            index: IndexConfig::InMemory {
-                tokenizer: Default::default(),
+            index: IndexConfig::InMemory(InMemoryIndexConfig {
                 persistence_path,
-            },
+                ..Default::default()
+            }),
             observer,
         })
     }

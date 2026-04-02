@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::VaultPath;
-use crate::index::SectionEntry;
+use crate::index::IndexEntry;
 
 /// Parse an optional folder string into a validated `VaultPath`.
 pub fn parse_folder(folder: Option<&str>) -> Result<Option<VaultPath>, rmcp::ErrorData> {
@@ -23,15 +23,20 @@ pub struct NoteAggregate {
 }
 
 /// Aggregate sections into notes for list operations.
-pub fn aggregate_sections_to_notes(sections: &[SectionEntry]) -> HashMap<VaultPath, NoteAggregate> {
+pub fn aggregate_sections_to_notes(sections: &[IndexEntry]) -> HashMap<VaultPath, NoteAggregate> {
     let mut aggregates: HashMap<VaultPath, NoteAggregate> = HashMap::new();
 
     for section in sections {
-        let entry = aggregates.entry(section.note_path.clone()).or_default();
+        let note_path = section
+            .path
+            .note_path()
+            .unwrap_or_else(|| section.path.clone());
+        let entry = aggregates.entry(note_path).or_default();
 
         // Title comes from first heading (root section or first H1)
-        if entry.title.is_none() && !section.heading_path.is_empty() {
-            entry.title = Some(section.heading_path[0].clone());
+        let headings = section.path.section_headings();
+        if entry.title.is_none() && !headings.is_empty() {
+            entry.title = Some(headings[0].clone());
         }
 
         entry.tags.extend(section.tags.iter().cloned());

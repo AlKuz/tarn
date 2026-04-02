@@ -1057,7 +1057,7 @@ mod crlf_support {
         let results = core
             .search(
                 "unique_term_123",
-                tarn::core::responses::SearchOptions {
+                tarn::index::SearchParams {
                     limit: 10,
                     ..Default::default()
                 },
@@ -1065,8 +1065,8 @@ mod crlf_support {
             .await
             .unwrap();
 
-        assert_eq!(results.total, 1);
-        assert_eq!(results.hits[0].path.to_string(), "searchable.md");
+        assert!(!results.is_empty());
+        assert!(results[0].path.to_string().starts_with("searchable.md"));
     }
 }
 
