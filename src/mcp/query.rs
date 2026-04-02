@@ -5,6 +5,34 @@
 
 use crate::common::VaultPath;
 
+/// Tokenize a raw query string, respecting double-quoted spans.
+///
+/// `tag:"multi word"` becomes the single token `tag:multi word`.
+/// Unclosed quotes treat the rest of the string as one token.
+fn tokenize_query(raw: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for ch in raw.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
 /// Result of parsing a raw query string.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedQuery {
@@ -37,7 +65,7 @@ impl From<&str> for ParsedQuery {
         let mut tags = Vec::new();
         let mut folders = Vec::new();
 
-        for token in raw.split_whitespace() {
+        for token in tokenize_query(raw) {
             if let Some(tag) = token.strip_prefix("tag:") {
                 if !tag.is_empty() {
                     tags.push(tag.to_string());
@@ -161,5 +189,42 @@ mod tests {
     fn multiple_folders() {
         let parsed = ParsedQuery::from("folder:a/ folder:b/");
         assert_eq!(parsed.folders.len(), 2);
+    }
+
+    // --- Quoted string tests ---
+
+    #[test]
+    fn quoted_tag_value() {
+        let parsed = ParsedQuery::from(r#"tag:"multi word" search"#);
+        assert_eq!(parsed.tags, vec!["multi word"]);
+        assert_eq!(parsed.text, "search");
+    }
+
+    #[test]
+    fn quoted_folder_value() {
+        let parsed = ParsedQuery::from(r#"folder:"my folder/" search"#);
+        assert_eq!(parsed.folders.len(), 1);
+        assert_eq!(parsed.folders[0].to_string(), "my folder/");
+        assert_eq!(parsed.text, "search");
+    }
+
+    #[test]
+    fn unclosed_quote_treats_rest_as_token() {
+        let parsed = ParsedQuery::from(r#"tag:"open ended"#);
+        assert_eq!(parsed.tags, vec!["open ended"]);
+    }
+
+    #[test]
+    fn mixed_quoted_and_unquoted() {
+        let parsed = ParsedQuery::from(r#"event sourcing tag:"project management" folder:concepts/"#);
+        assert_eq!(parsed.text, "event sourcing");
+        assert_eq!(parsed.tags, vec!["project management"]);
+        assert_eq!(parsed.folders.len(), 1);
+    }
+
+    #[test]
+    fn quoted_text_not_a_filter() {
+        let parsed = ParsedQuery::from(r#""hello world" search"#);
+        assert_eq!(parsed.text, "hello world search");
     }
 }

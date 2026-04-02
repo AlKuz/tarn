@@ -17,7 +17,7 @@ pub use config::{TokenizerConfig, TokenizerError};
 #[cfg(feature = "hf-tokenizer")]
 pub use hf::HfTokenizer;
 pub use naive::NaiveTokenizer;
-pub use ngram::{NgramTokenizer, NgramTokenizerConfig};
+pub use ngram::{NgramError, NgramTokenizer, NgramTokenizerConfig};
 #[cfg(feature = "stemming")]
 pub use stemming::StemmingTokenizer;
 

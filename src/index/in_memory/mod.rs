@@ -5,10 +5,10 @@ pub mod rrf;
 pub mod scorer;
 mod tags;
 
-pub use bm25::{BM25Config, BM25Index};
+pub use bm25::{BM25Config, BM25Index, BM25Snapshot};
 pub use rrf::{RRF, RRFConfig};
 pub use scorer::Scorer;
-pub use tags::{TagIndex, TagIndexConfig};
+pub use tags::{TagIndex, TagIndexConfig, TagIndexError};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -47,7 +47,7 @@ impl From<InMemoryIndexError> for IndexError {
 // ---------------------------------------------------------------------------
 
 /// Version marker for persistence format. Bump to force rebuild.
-const INDEX_DATA_VERSION: u32 = 2;
+const INDEX_DATA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct IndexData {
@@ -55,6 +55,8 @@ struct IndexData {
     version: u32,
     meta: IndexMeta,
     sections: HashMap<VaultPath, IndexEntry>,
+    #[serde(default)]
+    bm25_snapshot: Option<BM25Snapshot>,
 }
 
 impl IndexData {
@@ -66,6 +68,7 @@ impl IndexData {
                 last_indexed: None,
             },
             sections: HashMap::new(),
+            bm25_snapshot: None,
         }
     }
 
@@ -93,6 +96,8 @@ pub struct InMemoryIndex {
     bm25_index: RwLock<BM25Index>,
     tag_index: RwLock<TagIndex>,
     rrf: RRF,
+    bm25_config: BM25Config,
+    tag_index_config: TagIndexConfig,
     persistence_path: Option<PathBuf>,
 }
 
@@ -108,7 +113,7 @@ impl InMemoryIndex {
         rrf: RRF,
         persistence_path: Option<PathBuf>,
     ) -> Result<Self, InMemoryIndexError> {
-        let data = match &persistence_path {
+        let mut data = match &persistence_path {
             Some(path) if path.exists() => {
                 let bytes = std::fs::read(path)?;
                 let loaded: IndexData = serde_json::from_slice(&bytes)?;
@@ -122,24 +127,30 @@ impl InMemoryIndex {
             _ => IndexData::new(),
         };
 
-        // Rebuild scorer indexes from persisted sections
+        // Rebuild scorer indexes from persisted state
         let mut bm25 = bm25_index;
         let mut tags = tag_index;
+
+        // Restore BM25 from its own snapshot
+        if let Some(snapshot) = data.bm25_snapshot.take() {
+            bm25.restore(snapshot);
+        }
+
+        // Rebuild tag index from persisted section tags
         for (section_path, entry) in &data.sections {
-            // Reconstruct content for BM25 from section entry
-            // We store token_count but not content, so we rebuild from tags for now.
-            // BM25 index data is lost on restart — full rebuild needed via rebuild_index().
             tags.add(section_path.clone(), &entry.tags);
         }
-        // Note: BM25 index will be empty after restart. A rebuild_index() call is needed
-        // to repopulate it from storage. This is the expected flow.
-        let _ = &mut bm25; // suppress unused warning
+
+        let bm25_config = bm25.config();
+        let tag_index_config = tags.config();
 
         Ok(Self {
             data: RwLock::new(data),
             bm25_index: RwLock::new(bm25),
             tag_index: RwLock::new(tags),
             rrf,
+            bm25_config,
+            tag_index_config,
             persistence_path,
         })
     }
@@ -151,7 +162,9 @@ impl InMemoryIndex {
         };
 
         let bytes = {
-            let inner = self.data.read().await;
+            let mut inner = self.data.write().await;
+            let bm25 = self.bm25_index.read().await;
+            inner.bm25_snapshot = Some(bm25.snapshot());
             serde_json::to_vec(&*inner)?
         };
 
@@ -267,11 +280,9 @@ impl Configurable for InMemoryIndex {
     type Config = InMemoryIndexConfig;
 
     fn config(&self) -> Self::Config {
-        // We can't access async locks in a sync fn, so return defaults.
-        // This is only used for persistence validation which we now handle via version.
         InMemoryIndexConfig {
-            bm25_index: BM25Config::default(),
-            tag_index: TagIndexConfig::default(),
+            bm25_index: self.bm25_config.clone(),
+            tag_index: self.tag_index_config.clone(),
             rrf: self.rrf.config(),
             persistence_path: self.persistence_path.clone(),
         }
@@ -332,29 +343,7 @@ impl Index for InMemoryIndex {
             let tag_index = self.tag_index.read().await;
 
             let mut candidates: HashSet<VaultPath> = if !params.tags.is_empty() {
-                // Hierarchical tag expansion: "project" matches "project/alpha"
-                let expanded_tags: HashSet<String> = {
-                    let all_section_paths: HashSet<VaultPath> =
-                        data.sections.keys().cloned().collect();
-                    let mut expanded = HashSet::new();
-                    for filter_tag in &params.tags {
-                        expanded.insert(filter_tag.clone());
-                        // Find all tags in the index that are children of filter_tag
-                        for section_path in &all_section_paths {
-                            if let Some(section_tags) = tag_index.tags_for_section(section_path) {
-                                for tag in section_tags {
-                                    if tag.starts_with(filter_tag.as_str())
-                                        && tag.len() > filter_tag.len()
-                                        && tag.as_bytes().get(filter_tag.len()) == Some(&b'/')
-                                    {
-                                        expanded.insert(tag.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    expanded
-                };
+                let expanded_tags = tag_index.expand_hierarchical(&params.tags);
                 tag_index.filter(Some(&expanded_tags), None)
             } else {
                 data.sections.keys().cloned().collect()

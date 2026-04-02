@@ -64,6 +64,16 @@ impl Buildable for BM25Config {
     }
 }
 
+/// Serializable snapshot of BM25 index state for persistence.
+///
+/// The inverted index is rebuilt from `documents` on restore.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BM25Snapshot {
+    pub documents: HashMap<VaultPath, DocumentData>,
+    pub doc_count: usize,
+    pub total_doc_length: u64,
+}
+
 /// Document data stored for BM25 scoring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentData {
@@ -198,6 +208,35 @@ impl BM25Index {
             .collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results
+    }
+
+    /// Create a snapshot of the index state for persistence.
+    pub fn snapshot(&self) -> BM25Snapshot {
+        BM25Snapshot {
+            documents: self.documents.clone(),
+            doc_count: self.doc_count,
+            total_doc_length: self.total_doc_length,
+        }
+    }
+
+    /// Restore index state from a persisted snapshot.
+    ///
+    /// Rebuilds the inverted index from document term frequencies.
+    pub fn restore(&mut self, snapshot: BM25Snapshot) {
+        self.documents = snapshot.documents;
+        self.doc_count = snapshot.doc_count;
+        self.total_doc_length = snapshot.total_doc_length;
+
+        // Rebuild inverted index from documents
+        self.inverted.clear();
+        for (section_path, doc_data) in &self.documents {
+            for (term, freq) in &doc_data.term_freqs {
+                self.inverted
+                    .entry(term.clone())
+                    .or_default()
+                    .push((section_path.clone(), *freq));
+            }
+        }
     }
 
     /// Clear all indexed data.

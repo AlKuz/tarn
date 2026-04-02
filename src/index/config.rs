@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::common::Buildable;
 use crate::index::InMemoryIndex;
 use crate::index::in_memory::InMemoryIndexError;
-use crate::index::in_memory::{BM25Config, RRFConfig, TagIndexConfig};
+use crate::index::in_memory::{BM25Config, RRFConfig, TagIndexConfig, TagIndexError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InMemoryIndexConfig {
@@ -31,6 +31,8 @@ pub enum IndexConfig {
 pub enum IndexBuildError {
     #[error(transparent)]
     Index(#[from] InMemoryIndexError),
+    #[error("tag index: {0}")]
+    TagIndex(#[from] TagIndexError),
 }
 
 /// Compute the default persistence path for an index.
@@ -58,9 +60,9 @@ impl Buildable for InMemoryIndexConfig {
     type Error = IndexBuildError;
 
     fn build(&self) -> Result<Self::Target, Self::Error> {
-        let bm25_index = self.bm25_index.build().unwrap();
-        let tag_idx = self.tag_index.build().unwrap();
-        let rrf_instance = self.rrf.build().unwrap();
+        let bm25_index = self.bm25_index.build().unwrap(); // Infallible
+        let tag_idx = self.tag_index.build()?;
+        let rrf_instance = self.rrf.build().unwrap(); // Infallible
         let index = InMemoryIndex::new(
             bm25_index,
             tag_idx,

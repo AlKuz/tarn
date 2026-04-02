@@ -1,8 +1,17 @@
 //! Character n-gram tokenizer for trigram similarity scoring.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
+use super::config::TokenizerConfig;
 use crate::common::{Buildable, Configurable};
+
+/// Errors from n-gram tokenizer construction.
+#[derive(Debug, Error)]
+pub enum NgramError {
+    #[error("n-gram size must be positive, got {0}")]
+    InvalidSize(usize),
+}
 
 /// Configuration for the n-gram tokenizer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,10 +33,10 @@ impl Default for NgramTokenizerConfig {
 
 impl Buildable for NgramTokenizerConfig {
     type Target = NgramTokenizer;
-    type Error = std::convert::Infallible;
+    type Error = NgramError;
 
     fn build(&self) -> Result<Self::Target, Self::Error> {
-        Ok(NgramTokenizer::new(self.n))
+        NgramTokenizer::new(self.n)
     }
 }
 
@@ -42,9 +51,11 @@ pub struct NgramTokenizer {
 }
 
 impl NgramTokenizer {
-    pub fn new(n: usize) -> Self {
-        assert!(n > 0, "n-gram size must be positive");
-        Self { n }
+    pub fn new(n: usize) -> Result<Self, NgramError> {
+        if n == 0 {
+            return Err(NgramError::InvalidSize(n));
+        }
+        Ok(Self { n })
     }
 
     /// Generate n-grams from text.
@@ -72,10 +83,16 @@ impl NgramTokenizer {
 }
 
 impl Configurable for NgramTokenizer {
-    type Config = NgramTokenizerConfig;
+    type Config = TokenizerConfig;
 
     fn config(&self) -> Self::Config {
-        NgramTokenizerConfig { n: self.n }
+        TokenizerConfig::Ngram { n: self.n }
+    }
+}
+
+impl super::Tokenizer for NgramTokenizer {
+    fn tokenize(&self, text: &str) -> Vec<String> {
+        self.tokenize(text)
     }
 }
 
@@ -85,52 +102,43 @@ mod tests {
 
     #[test]
     fn trigrams_basic() {
-        let tok = NgramTokenizer::new(3);
+        let tok = NgramTokenizer::new(3).unwrap();
         let ngrams = tok.tokenize("rust");
-        // padded: "$$rust$$"
-        // windows: "$$r", "$ru", "rus", "ust", "st$", "t$$"
         assert_eq!(ngrams, vec!["$$r", "$ru", "rus", "ust", "st$", "t$$"]);
     }
 
     #[test]
     fn trigrams_lowercase() {
-        let tok = NgramTokenizer::new(3);
+        let tok = NgramTokenizer::new(3).unwrap();
         let ngrams = tok.tokenize("Rust");
         assert_eq!(ngrams, vec!["$$r", "$ru", "rus", "ust", "st$", "t$$"]);
     }
 
     #[test]
     fn empty_string() {
-        let tok = NgramTokenizer::new(3);
+        let tok = NgramTokenizer::new(3).unwrap();
         let ngrams = tok.tokenize("");
-        // padded: "$$$$" (4 chars), windows of 3: ["$$$", "$$$"]
-        // This is degenerate but should not panic
         assert!(!ngrams.is_empty());
     }
 
     #[test]
     fn single_char() {
-        let tok = NgramTokenizer::new(3);
+        let tok = NgramTokenizer::new(3).unwrap();
         let ngrams = tok.tokenize("a");
-        // padded: "$$a$$"
-        // windows: "$$a", "$a$", "a$$"
         assert_eq!(ngrams, vec!["$$a", "$a$", "a$$"]);
     }
 
     #[test]
     fn bigrams() {
-        let tok = NgramTokenizer::new(2);
+        let tok = NgramTokenizer::new(2).unwrap();
         let ngrams = tok.tokenize("ab");
-        // padded: "$ab$"
-        // windows: "$a", "ab", "b$"
         assert_eq!(ngrams, vec!["$a", "ab", "b$"]);
     }
 
     #[test]
     fn spaces_preserved() {
-        let tok = NgramTokenizer::new(3);
+        let tok = NgramTokenizer::new(3).unwrap();
         let ngrams = tok.tokenize("a b");
-        // padded: "$$a b$$"
         assert!(ngrams.contains(&"a b".to_string()));
     }
 
@@ -138,7 +146,7 @@ mod tests {
     fn config_roundtrip() {
         let config = NgramTokenizerConfig { n: 4 };
         let tok = config.build().unwrap();
-        assert_eq!(tok.config(), NgramTokenizerConfig { n: 4 });
+        assert_eq!(tok.config(), TokenizerConfig::Ngram { n: 4 });
     }
 
     #[test]
@@ -148,8 +156,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "n-gram size must be positive")]
-    fn zero_n_panics() {
-        NgramTokenizer::new(0);
+    fn zero_n_returns_error() {
+        assert!(NgramTokenizer::new(0).is_err());
     }
 }

@@ -3,9 +3,17 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::common::{Buildable, Configurable, VaultPath};
-use crate::tokenizer::NgramTokenizer;
+use crate::tokenizer::{NgramError, NgramTokenizer};
+
+/// Errors from tag index construction.
+#[derive(Debug, Error)]
+pub enum TagIndexError {
+    #[error(transparent)]
+    Ngram(#[from] NgramError),
+}
 
 use super::scorer::Scorer;
 
@@ -39,11 +47,11 @@ impl Default for TagIndexConfig {
 
 impl Buildable for TagIndexConfig {
     type Target = TagIndex;
-    type Error = std::convert::Infallible;
+    type Error = TagIndexError;
 
     fn build(&self) -> Result<Self::Target, Self::Error> {
         Ok(TagIndex {
-            ngram_tokenizer: NgramTokenizer::new(self.n),
+            ngram_tokenizer: NgramTokenizer::new(self.n)?,
             threshold: self.threshold,
             index: HashMap::new(),
             reverse: HashMap::new(),
@@ -160,6 +168,27 @@ impl TagIndex {
         self.section_trigrams.clear();
     }
 
+    /// Expand filter tags to include hierarchical children.
+    ///
+    /// For each filter tag, finds all tags in the index that are direct or nested
+    /// children (e.g., `"project"` expands to include `"project/alpha"`,
+    /// `"project/alpha/v2"`). O(unique_tags) instead of O(sections × tags).
+    pub fn expand_hierarchical(&self, filter_tags: &[String]) -> HashSet<String> {
+        let mut expanded = HashSet::new();
+        for filter_tag in filter_tags {
+            expanded.insert(filter_tag.clone());
+            for tag in self.index.keys() {
+                if tag.starts_with(filter_tag.as_str())
+                    && tag.len() > filter_tag.len()
+                    && tag.as_bytes().get(filter_tag.len()) == Some(&b'/')
+                {
+                    expanded.insert(tag.clone());
+                }
+            }
+        }
+        expanded
+    }
+
     /// Get all tags for a section.
     pub fn tags_for_section(&self, section_path: &VaultPath) -> Option<&HashSet<String>> {
         self.reverse.get(section_path)
@@ -214,8 +243,12 @@ impl Configurable for TagIndex {
     type Config = TagIndexConfig;
 
     fn config(&self) -> Self::Config {
+        let n = match self.ngram_tokenizer.config() {
+            crate::tokenizer::TokenizerConfig::Ngram { n } => n,
+            _ => DEFAULT_N,
+        };
         TagIndexConfig {
-            n: self.ngram_tokenizer.config().n,
+            n,
             threshold: self.threshold,
         }
     }
@@ -465,6 +498,41 @@ mod tests {
         let config = TagIndexConfig::default();
         assert_eq!(config.n, 3);
         assert!((config.threshold - 0.0).abs() < f32::EPSILON);
+    }
+
+    // --- Hierarchical expansion tests ---
+
+    #[test]
+    fn expand_hierarchical_finds_children() {
+        let mut index = make_index();
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+        index.add(s1, &["project/alpha".into(), "rust".into()]);
+        index.add(s2, &["project/beta".into()]);
+
+        let expanded = index.expand_hierarchical(&["project".into()]);
+        assert!(expanded.contains("project"));
+        assert!(expanded.contains("project/alpha"));
+        assert!(expanded.contains("project/beta"));
+        assert!(!expanded.contains("rust"));
+    }
+
+    #[test]
+    fn expand_hierarchical_no_false_prefix_match() {
+        let mut index = make_index();
+        let s1 = section_path("note1.md", &[]);
+        index.add(s1, &["project".into(), "projects-old".into()]);
+
+        let expanded = index.expand_hierarchical(&["project".into()]);
+        assert!(expanded.contains("project"));
+        assert!(!expanded.contains("projects-old"));
+    }
+
+    #[test]
+    fn expand_hierarchical_empty_filter() {
+        let index = make_index();
+        let expanded = index.expand_hierarchical(&[]);
+        assert!(expanded.is_empty());
     }
 
     #[test]
