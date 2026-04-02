@@ -1,56 +1,35 @@
-//! Tokenizer module for text processing.
+//! Tokenizer module providing trait-based text tokenization.
 //!
-//! Provides a trait-based tokenizer abstraction with feature-gated implementations:
-//! - `NaiveTokenizer` — always available, whitespace-based
-//! - `HfTokenizer` — HuggingFace tokenizers (requires `hf-tokenizer` feature)
-//! - `StemmingTokenizer` — language-aware stemming (requires `stemming` feature)
+//! ## Structure
+//!
+//! - `mod.rs` — `Tokenizer` trait, `Box<dyn Tokenizer>` support, re-exports
+//! - `config.rs` — `TokenizerConfig` dispatch enum, `Buildable` impl
+//! - `errors.rs` — `TokenizerError` unified error type
+//! - `naive.rs` — `NaiveTokenizer` (whitespace-based, always available)
+//! - `ngram.rs` — `NgramTokenizer` (character n-grams for trigram similarity)
+//! - `hf.rs` — `HfTokenizer` (HuggingFace subword tokenizers, feature-gated)
+//! - `stemming.rs` — `StemmingTokenizer` (language-aware stemming, feature-gated)
 
-pub mod config;
+mod config;
+mod errors;
 #[cfg(feature = "hf-tokenizer")]
 mod hf;
 mod naive;
-pub mod ngram;
+mod ngram;
 #[cfg(feature = "stemming")]
 mod stemming;
 
-pub use config::{TokenizerConfig, TokenizerError};
+pub use config::TokenizerConfig;
+pub use errors::TokenizerError;
 #[cfg(feature = "hf-tokenizer")]
 pub use hf::HfTokenizer;
 pub use naive::NaiveTokenizer;
-pub use ngram::{NgramError, NgramTokenizer, NgramTokenizerConfig};
+pub use ngram::NgramTokenizer;
 #[cfg(feature = "stemming")]
 pub use stemming::StemmingTokenizer;
 
-use crate::common::{Buildable, Configurable};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use crate::common::Configurable;
 
 pub trait Tokenizer: Send + Sync + Configurable<Config = TokenizerConfig> {
     fn tokenize(&self, text: &str) -> Vec<String>;
-}
-
-impl Tokenizer for Box<dyn Tokenizer> {
-    fn tokenize(&self, text: &str) -> Vec<String> {
-        (**self).tokenize(text)
-    }
-}
-
-impl Configurable for Box<dyn Tokenizer> {
-    type Config = TokenizerConfig;
-
-    fn config(&self) -> Self::Config {
-        (**self).config()
-    }
-}
-
-impl Serialize for Box<dyn Tokenizer> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.config().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Box<dyn Tokenizer> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let config = TokenizerConfig::deserialize(deserializer)?;
-        config.build().map_err(serde::de::Error::custom)
-    }
 }

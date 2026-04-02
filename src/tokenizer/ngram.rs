@@ -1,44 +1,8 @@
 //! Character n-gram tokenizer for trigram similarity scoring.
 
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
 use super::config::TokenizerConfig;
-use crate::common::{Buildable, Configurable};
-
-/// Errors from n-gram tokenizer construction.
-#[derive(Debug, Error)]
-pub enum NgramError {
-    #[error("n-gram size must be positive, got {0}")]
-    InvalidSize(usize),
-}
-
-/// Configuration for the n-gram tokenizer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NgramTokenizerConfig {
-    /// Size of character n-grams (default: 3).
-    #[serde(default = "default_n")]
-    pub n: usize,
-}
-
-fn default_n() -> usize {
-    3
-}
-
-impl Default for NgramTokenizerConfig {
-    fn default() -> Self {
-        Self { n: default_n() }
-    }
-}
-
-impl Buildable for NgramTokenizerConfig {
-    type Target = NgramTokenizer;
-    type Error = NgramError;
-
-    fn build(&self) -> Result<Self::Target, Self::Error> {
-        NgramTokenizer::new(self.n)
-    }
-}
+use super::errors::TokenizerError;
+use crate::common::Configurable;
 
 /// Character n-gram tokenizer.
 ///
@@ -51,9 +15,9 @@ pub struct NgramTokenizer {
 }
 
 impl NgramTokenizer {
-    pub fn new(n: usize) -> Result<Self, NgramError> {
+    pub fn new(n: usize) -> Result<Self, TokenizerError> {
         if n == 0 {
-            return Err(NgramError::InvalidSize(n));
+            return Err(TokenizerError::InvalidNgramSize(n));
         }
         Ok(Self { n })
     }
@@ -144,15 +108,8 @@ mod tests {
 
     #[test]
     fn config_roundtrip() {
-        let config = NgramTokenizerConfig { n: 4 };
-        let tok = config.build().unwrap();
+        let tok = NgramTokenizer::new(4).unwrap();
         assert_eq!(tok.config(), TokenizerConfig::Ngram { n: 4 });
-    }
-
-    #[test]
-    fn default_config() {
-        let config = NgramTokenizerConfig::default();
-        assert_eq!(config.n, 3);
     }
 
     #[test]

@@ -216,7 +216,8 @@ mod tests {
 
     #[test]
     fn mixed_quoted_and_unquoted() {
-        let parsed = ParsedQuery::from(r#"event sourcing tag:"project management" folder:concepts/"#);
+        let parsed =
+            ParsedQuery::from(r#"event sourcing tag:"project management" folder:concepts/"#);
         assert_eq!(parsed.text, "event sourcing");
         assert_eq!(parsed.tags, vec!["project management"]);
         assert_eq!(parsed.folders.len(), 1);

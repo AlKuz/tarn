@@ -1,18 +1,8 @@
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
+use super::errors::TokenizerError;
 use crate::common::Buildable;
 use crate::tokenizer::Tokenizer;
-
-#[derive(Debug, Error)]
-pub enum TokenizerError {
-    #[error("feature '{0}' is not enabled")]
-    FeatureNotEnabled(String),
-    #[error("failed to load tokenizer: {0}")]
-    LoadFailed(String),
-    #[error(transparent)]
-    Ngram(#[from] super::NgramError),
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

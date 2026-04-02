@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::common::{Buildable, Configurable, VaultPath};
-use crate::tokenizer::{NgramError, NgramTokenizer};
+use crate::tokenizer::{NgramTokenizer, TokenizerError};
 
 /// Errors from tag index construction.
 #[derive(Debug, Error)]
 pub enum TagIndexError {
     #[error(transparent)]
-    Ngram(#[from] NgramError),
+    Tokenizer(#[from] TokenizerError),
 }
 
 use super::scorer::Scorer;
