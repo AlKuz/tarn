@@ -100,10 +100,14 @@ where
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let limit = params.limit.unwrap_or(20);
 
-        match params.query {
-            Some(query) if !query.is_empty() => {
+        // Normalize: whitespace-only becomes None
+        let query = params.query.filter(|q| !q.trim().is_empty());
+        let has_tag_filter = params.tag_filter.as_ref().is_some_and(|t| !t.is_empty());
+
+        match query {
+            Some(q) => {
                 // Search mode: parse query, score, group by note
-                let parsed = ParsedQuery::from(query);
+                let parsed = ParsedQuery::from(q);
 
                 // Merge inline filters with explicit params
                 let mut folders = parsed.folders;
@@ -205,8 +209,95 @@ where
                     Err(e) => tool_error(e),
                 }
             }
-            _ => {
-                // List mode: no query
+            None if has_tag_filter => {
+                // Tag-filter-only mode: route through search with empty text
+                let folders = match parse_folder(params.folder.as_deref())? {
+                    Some(f) => vec![f],
+                    None => vec![],
+                };
+                let search_params = SearchParams {
+                    folders,
+                    tags: params.tag_filter.unwrap_or_default(),
+                    limit: limit * 4,
+                };
+
+                match self.core.search("", search_params).await {
+                    Ok(section_hits) => {
+                        // Group sections by note (scores are uniform 1.0)
+                        let mut note_groups: HashMap<String, (usize, Vec<SectionScore>)> =
+                            HashMap::new();
+
+                        for hit in &section_hits {
+                            let note_path = hit
+                                .path
+                                .note_path()
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| hit.path.to_string());
+
+                            let heading_path: Vec<String> = hit
+                                .path
+                                .section_headings()
+                                .into_iter()
+                                .map(|s| s.to_string())
+                                .collect();
+
+                            let entry = note_groups
+                                .entry(note_path)
+                                .or_insert_with(|| (0, Vec::new()));
+                            entry.0 += hit.token_count;
+                            entry.1.push(SectionScore {
+                                heading_path,
+                                score: hit.score,
+                            });
+                        }
+
+                        // Sort by path for deterministic order
+                        let mut note_entries: Vec<_> = note_groups.into_iter().collect();
+                        note_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        note_entries.truncate(limit);
+
+                        // Apply token_limit and enrich with note metadata
+                        let mut results = Vec::new();
+                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
+
+                        for (path_str, (token_count, sections)) in note_entries {
+                            if token_budget == 0 {
+                                break;
+                            }
+
+                            let (title, tags) = match self.core.read(&path_str).await {
+                                Ok((note, _)) => {
+                                    let tags: Vec<String> =
+                                        note.tags().into_iter().map(String::from).collect();
+                                    (note.title.clone(), tags)
+                                }
+                                Err(_) => (None, Vec::new()),
+                            };
+
+                            let use_tokens = token_count.min(token_budget);
+                            token_budget = token_budget.saturating_sub(use_tokens);
+
+                            results.push(SearchResult {
+                                path: path_str,
+                                title,
+                                score: None, // No relevance score for filter-only
+                                tags,
+                                token_count: use_tokens,
+                                relevant_sections: Some(sections),
+                            });
+                        }
+
+                        let response = SearchResponse {
+                            total: results.len(),
+                            results,
+                        };
+                        tool_success(&response)
+                    }
+                    Err(e) => tool_error(e),
+                }
+            }
+            None => {
+                // List mode: no query, no filters
                 let folder = parse_folder(params.folder.as_deref())?;
                 match self.core.list(folder.as_ref(), true).await {
                     Ok(paths) => {
