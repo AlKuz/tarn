@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/AlKuz/tarn/compare/v0.6.0...v0.7.0) (2026-04-07)
+
+
+### Features
+
+* rrf ([#33](https://github.com/AlKuz/tarn/issues/33)) ([1801bbe](https://github.com/AlKuz/tarn/commit/1801bbe90801567d0ef5353d71a37866a95c5436))
+
 ## [0.6.0](https://github.com/AlKuz/tarn/compare/v0.5.2...v0.6.0) (2026-03-31)
 
 
