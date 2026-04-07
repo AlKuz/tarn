@@ -191,7 +191,7 @@ where
                                 title,
                                 score: Some(score),
                                 tags,
-                                token_count,
+                                token_count: use_tokens,
                                 relevant_sections: Some(sections),
                             });
                         }
@@ -233,7 +233,7 @@ where
                                         title: note.title.clone(),
                                         score: None,
                                         tags,
-                                        token_count,
+                                        token_count: use_tokens,
                                         relevant_sections: None,
                                     });
                                 }

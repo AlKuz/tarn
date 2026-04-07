@@ -161,10 +161,14 @@ impl InMemoryIndex {
             return Ok(());
         };
 
+        let bm25_snapshot = {
+            let bm25 = self.bm25_index.read().await;
+            bm25.snapshot()
+        };
+
         let bytes = {
             let mut inner = self.data.write().await;
-            let bm25 = self.bm25_index.read().await;
-            inner.bm25_snapshot = Some(bm25.snapshot());
+            inner.bm25_snapshot = Some(bm25_snapshot);
             serde_json::to_vec(&*inner)?
         };
 
@@ -333,7 +337,7 @@ impl Index for InMemoryIndex {
         query: &str,
         params: SearchParams,
     ) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
-        if query.is_empty() && params.tags.is_empty() {
+        if query.is_empty() && params.tags.is_empty() && params.folders.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -365,6 +369,23 @@ impl Index for InMemoryIndex {
 
         if candidates.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // When the query text is empty (tag-only or folder-only filter), skip
+        // scoring and return all filtered candidates with a uniform score so
+        // that callers receive meaningful results.
+        if query.is_empty() {
+            let data = self.data.read().await;
+            let mut results: Vec<(IndexEntry, f32)> = candidates
+                .into_iter()
+                .filter_map(|path| {
+                    let entry = data.sections.get(&path)?;
+                    Some((entry.clone(), 1.0))
+                })
+                .collect();
+            results.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+            results.truncate(params.limit);
+            return Ok(results);
         }
 
         // Step 2: Score candidates through both pipelines

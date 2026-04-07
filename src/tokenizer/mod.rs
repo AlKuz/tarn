@@ -2,7 +2,7 @@
 //!
 //! ## Structure
 //!
-//! - `mod.rs` — `Tokenizer` trait, `Box<dyn Tokenizer>` support, re-exports
+//! - `mod.rs` — `Tokenizer` trait and re-exports
 //! - `config.rs` — `TokenizerConfig` dispatch enum, `Buildable` impl
 //! - `errors.rs` — `TokenizerError` unified error type
 //! - `naive.rs` — `NaiveTokenizer` (whitespace-based, always available)
