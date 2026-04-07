@@ -1,28 +1,33 @@
+use std::collections::HashMap;
+
 use regex::RegexBuilder;
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use schemars::JsonSchema;
 
 use super::TarnMcpServer;
 use super::helpers::parse_folder;
-use super::responses::{SearchResponse, SearchResult, WriteNoteResponse};
+use super::responses::{SearchResponse, SearchResult, SectionScore, WriteNoteResponse};
 use crate::common::RevisionToken;
-use crate::core::responses::{ReplaceMode, SearchOptions};
-use crate::index::Index;
+use crate::core::responses::ReplaceMode;
+use crate::index::{Index, SearchParams};
+use crate::mcp::query::ParsedQuery;
 use crate::observer::Observer;
 use crate::storage::Storage;
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct SearchNotesParams {
-    #[schemars(description = "Search query (case-insensitive text match)")]
-    pub query: String,
-    #[schemars(description = "Restrict search to folder path")]
+    #[schemars(
+        description = "Search query. Supports tag:name and folder:path inline filters. Omit to list notes."
+    )]
+    pub query: Option<String>,
+    #[schemars(description = "Restrict to folder path")]
     pub folder: Option<String>,
-    #[schemars(description = "Notes must have all these tags")]
+    #[schemars(description = "Notes must have at least one of these tags")]
     pub tag_filter: Option<Vec<String>>,
-    #[schemars(description = "Max results (default: 20)")]
+    #[schemars(description = "Max note results (default: 20)")]
     pub limit: Option<usize>,
-    #[schemars(description = "Pagination offset")]
-    pub offset: Option<usize>,
+    #[schemars(description = "Max total tokens across all results")]
+    pub token_limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
@@ -87,48 +92,255 @@ where
     O: Observer + Send + Sync + 'static,
 {
     #[tool(
-        description = "Search across the vault using full-text matching. Returns matching notes with metadata."
+        description = "Search across the vault or list notes. When query is provided, returns notes ranked by relevance with section scores. When query is omitted, lists notes in a folder."
     )]
     async fn tarn_search_notes(
         &self,
         Parameters(params): Parameters<SearchNotesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let folder = parse_folder(params.folder.as_deref())?;
         let limit = params.limit.unwrap_or(20);
-        let offset = params.offset.unwrap_or(0);
 
-        let options = SearchOptions {
-            folder,
-            tags: params.tag_filter,
-            limit,
-            offset,
-        };
+        // Normalize: whitespace-only becomes None
+        let query = params.query.filter(|q| !q.trim().is_empty());
+        let has_tag_filter = params.tag_filter.as_ref().is_some_and(|t| !t.is_empty());
 
-        match self.core.search(&params.query, options).await {
-            Ok(core_response) => {
-                let mut results = Vec::new();
-                for hit in &core_response.hits {
-                    let path_str = hit.path.to_string();
-                    match self.core.read(&path_str).await {
-                        Ok((note, _)) => {
-                            let tags: Vec<String> =
-                                note.tags().into_iter().map(String::from).collect();
-                            results.push(SearchResult {
-                                path: path_str,
-                                title: note.title.clone(),
-                                tags,
+        match query {
+            Some(q) => {
+                // Search mode: parse query, score, group by note
+                let parsed = ParsedQuery::from(q);
+
+                // Merge inline filters with explicit params
+                let mut folders = parsed.folders;
+                if let Some(folder) = parse_folder(params.folder.as_deref())? {
+                    folders.push(folder);
+                }
+
+                let mut tags = parsed.tags;
+                if let Some(filter_tags) = params.tag_filter {
+                    tags.extend(filter_tags);
+                }
+
+                let search_params = SearchParams {
+                    folders,
+                    tags,
+                    limit: limit * 4, // Over-fetch sections for note dedup
+                };
+
+                match self.core.search(&parsed.text, search_params).await {
+                    Ok(section_hits) => {
+                        // Group sections by note
+                        let mut note_groups: HashMap<String, (f32, usize, Vec<SectionScore>)> =
+                            HashMap::new();
+
+                        for hit in &section_hits {
+                            let note_path = hit
+                                .path
+                                .note_path()
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| hit.path.to_string());
+
+                            let heading_path: Vec<String> = hit
+                                .path
+                                .section_headings()
+                                .into_iter()
+                                .map(|s| s.to_string())
+                                .collect();
+
+                            let entry = note_groups
+                                .entry(note_path)
+                                .or_insert_with(|| (0.0, 0, Vec::new()));
+
+                            if hit.score > entry.0 {
+                                entry.0 = hit.score;
+                            }
+                            entry.1 += hit.token_count;
+                            entry.2.push(SectionScore {
+                                heading_path,
+                                score: hit.score,
                             });
                         }
-                        Err(_) => continue,
+
+                        // Sort notes by max score descending
+                        let mut note_entries: Vec<_> = note_groups.into_iter().collect();
+                        note_entries.sort_by(|a, b| {
+                            b.1.0
+                                .partial_cmp(&a.1.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        note_entries.truncate(limit);
+
+                        // Apply token_limit and enrich with note metadata
+                        let mut results = Vec::new();
+                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
+
+                        for (path_str, (score, token_count, sections)) in note_entries {
+                            if token_budget == 0 {
+                                break;
+                            }
+
+                            let (title, tags) = match self.core.read(&path_str).await {
+                                Ok((note, _)) => {
+                                    let tags: Vec<String> =
+                                        note.tags().into_iter().map(String::from).collect();
+                                    (note.title.clone(), tags)
+                                }
+                                Err(_) => (None, Vec::new()),
+                            };
+
+                            let use_tokens = token_count.min(token_budget);
+                            token_budget = token_budget.saturating_sub(use_tokens);
+
+                            results.push(SearchResult {
+                                path: path_str,
+                                title,
+                                score: Some(score),
+                                tags,
+                                token_count: use_tokens,
+                                relevant_sections: Some(sections),
+                            });
+                        }
+
+                        let response = SearchResponse {
+                            total: results.len(),
+                            results,
+                        };
+                        tool_success(&response)
                     }
+                    Err(e) => tool_error(e),
                 }
-                let response = SearchResponse {
-                    total: core_response.total,
-                    results,
-                };
-                tool_success(&response)
             }
-            Err(e) => tool_error(e),
+            None if has_tag_filter => {
+                // Tag-filter-only mode: route through search with empty text
+                let folders = match parse_folder(params.folder.as_deref())? {
+                    Some(f) => vec![f],
+                    None => vec![],
+                };
+                let search_params = SearchParams {
+                    folders,
+                    tags: params.tag_filter.unwrap_or_default(),
+                    limit: limit * 4,
+                };
+
+                match self.core.search("", search_params).await {
+                    Ok(section_hits) => {
+                        // Group sections by note (scores are uniform 1.0)
+                        let mut note_groups: HashMap<String, (usize, Vec<SectionScore>)> =
+                            HashMap::new();
+
+                        for hit in &section_hits {
+                            let note_path = hit
+                                .path
+                                .note_path()
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| hit.path.to_string());
+
+                            let heading_path: Vec<String> = hit
+                                .path
+                                .section_headings()
+                                .into_iter()
+                                .map(|s| s.to_string())
+                                .collect();
+
+                            let entry = note_groups
+                                .entry(note_path)
+                                .or_insert_with(|| (0, Vec::new()));
+                            entry.0 += hit.token_count;
+                            entry.1.push(SectionScore {
+                                heading_path,
+                                score: hit.score,
+                            });
+                        }
+
+                        // Sort by path for deterministic order
+                        let mut note_entries: Vec<_> = note_groups.into_iter().collect();
+                        note_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        note_entries.truncate(limit);
+
+                        // Apply token_limit and enrich with note metadata
+                        let mut results = Vec::new();
+                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
+
+                        for (path_str, (token_count, sections)) in note_entries {
+                            if token_budget == 0 {
+                                break;
+                            }
+
+                            let (title, tags) = match self.core.read(&path_str).await {
+                                Ok((note, _)) => {
+                                    let tags: Vec<String> =
+                                        note.tags().into_iter().map(String::from).collect();
+                                    (note.title.clone(), tags)
+                                }
+                                Err(_) => (None, Vec::new()),
+                            };
+
+                            let use_tokens = token_count.min(token_budget);
+                            token_budget = token_budget.saturating_sub(use_tokens);
+
+                            results.push(SearchResult {
+                                path: path_str,
+                                title,
+                                score: None, // No relevance score for filter-only
+                                tags,
+                                token_count: use_tokens,
+                                relevant_sections: Some(sections),
+                            });
+                        }
+
+                        let response = SearchResponse {
+                            total: results.len(),
+                            results,
+                        };
+                        tool_success(&response)
+                    }
+                    Err(e) => tool_error(e),
+                }
+            }
+            None => {
+                // List mode: no query, no filters
+                let folder = parse_folder(params.folder.as_deref())?;
+                match self.core.list(folder.as_ref(), true).await {
+                    Ok(paths) => {
+                        let mut results = Vec::new();
+                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
+
+                        for path in paths.iter().take(limit) {
+                            if token_budget == 0 {
+                                break;
+                            }
+
+                            let path_str = path.to_string();
+                            match self.core.read(&path_str).await {
+                                Ok((note, _)) => {
+                                    let tags: Vec<String> =
+                                        note.tags().into_iter().map(String::from).collect();
+                                    let token_count = note.word_count(); // approximate
+
+                                    let use_tokens = token_count.min(token_budget);
+                                    token_budget = token_budget.saturating_sub(use_tokens);
+
+                                    results.push(SearchResult {
+                                        path: path_str,
+                                        title: note.title.clone(),
+                                        score: None,
+                                        tags,
+                                        token_count: use_tokens,
+                                        relevant_sections: None,
+                                    });
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+
+                        let response = SearchResponse {
+                            total: results.len(),
+                            results,
+                        };
+                        tool_success(&response)
+                    }
+                    Err(e) => tool_error(e),
+                }
+            }
         }
     }
 

@@ -261,13 +261,13 @@ mod index_sync {
     use super::*;
     use tarn::TarnConfig;
     use tarn::common::Buildable;
-    use tarn::core::responses::SearchOptions;
+    use tarn::index::SearchParams;
 
     const WATCHER_SETTLE_MS: u64 = 100;
     const SYNC_WAIT_MS: u64 = 500;
 
-    fn search_opts(limit: usize) -> SearchOptions {
-        SearchOptions {
+    fn search_opts(limit: usize) -> SearchParams {
+        SearchParams {
             limit,
             ..Default::default()
         }
@@ -278,10 +278,9 @@ mod index_sync {
         let dir = TempDir::new().unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory {
-                tokenizer: Default::default(),
-                persistence_path: None,
-            })
+            .with_index(tarn::index::IndexConfig::InMemory(
+                tarn::index::InMemoryIndexConfig::default(),
+            ))
             .build()
             .unwrap();
 
@@ -306,8 +305,8 @@ mod index_sync {
             .search("rust programming", search_opts(10))
             .await
             .unwrap();
-        assert_eq!(results.total, 1);
-        assert_eq!(results.hits[0].path.to_string(), "test.md");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.to_string().starts_with("test.md"));
     }
 
     #[tokio::test]
@@ -323,10 +322,9 @@ mod index_sync {
         .unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory {
-                tokenizer: Default::default(),
-                persistence_path: None,
-            })
+            .with_index(tarn::index::IndexConfig::InMemory(
+                tarn::index::InMemoryIndexConfig::default(),
+            ))
             .build()
             .unwrap();
 
@@ -334,7 +332,7 @@ mod index_sync {
 
         // Verify initial content is indexed
         let results = core.search("apples", search_opts(10)).await.unwrap();
-        assert_eq!(results.total, 1);
+        assert_eq!(results.len(), 1);
 
         let _handle = core.start_index_sync();
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
@@ -351,10 +349,10 @@ mod index_sync {
 
         // Verify old content is gone, new content is indexed
         let old_results = core.search("apples", search_opts(10)).await.unwrap();
-        assert_eq!(old_results.total, 0);
+        assert!(old_results.is_empty());
 
         let new_results = core.search("oranges", search_opts(10)).await.unwrap();
-        assert_eq!(new_results.total, 1);
+        assert_eq!(new_results.len(), 1);
     }
 
     #[tokio::test]
@@ -370,10 +368,9 @@ mod index_sync {
         .unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory {
-                tokenizer: Default::default(),
-                persistence_path: None,
-            })
+            .with_index(tarn::index::IndexConfig::InMemory(
+                tarn::index::InMemoryIndexConfig::default(),
+            ))
             .build()
             .unwrap();
 
@@ -381,7 +378,7 @@ mod index_sync {
 
         // Verify file is indexed
         let results = core.search("deleteme", search_opts(10)).await.unwrap();
-        assert_eq!(results.total, 1);
+        assert_eq!(results.len(), 1);
 
         let _handle = core.start_index_sync();
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
@@ -395,7 +392,7 @@ mod index_sync {
 
         // Verify file is no longer in index
         let results = core.search("deleteme", search_opts(10)).await.unwrap();
-        assert_eq!(results.total, 0);
+        assert!(results.is_empty());
     }
 
     #[tokio::test]
@@ -403,10 +400,9 @@ mod index_sync {
         let dir = TempDir::new().unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory {
-                tokenizer: Default::default(),
-                persistence_path: None,
-            })
+            .with_index(tarn::index::IndexConfig::InMemory(
+                tarn::index::InMemoryIndexConfig::default(),
+            ))
             .build()
             .unwrap();
 

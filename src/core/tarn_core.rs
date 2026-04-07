@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::core::config::TarnConfig;
-use crate::core::responses::{CoreSearchResponse, SearchHit, SearchOptions, TagEntry};
+use crate::core::responses::{SectionHit, TagEntry};
 use crate::index::find_direct_children;
 use crate::index::{Index, IndexError, IndexLink, SearchParams};
 use crate::note_handler::{Note, Section};
@@ -52,9 +52,10 @@ impl<S, I, O> TarnCore<S, I, O> {
 impl<S, I, O> Configurable for TarnCore<S, I, O>
 where
     S: Storage + Configurable + Send + Sync + 'static,
-    I: Index + Send + Sync + 'static,
+    I: Index + Configurable + Send + Sync + 'static,
     O: Observer + Configurable + Send + Sync + 'static,
     S::Config: Serialize + DeserializeOwned,
+    I::Config: Serialize + DeserializeOwned,
     O::Config: Serialize + DeserializeOwned,
 {
     type Config = TarnConfig<S::Config, <I as Configurable>::Config, O::Config>;
@@ -240,8 +241,10 @@ where
         let mut seen = HashSet::new();
         let mut paths = Vec::new();
         for section in sections {
-            if seen.insert(section.note_path.clone()) {
-                paths.push(section.note_path);
+            if let Some(np) = section.path.note_path()
+                && seen.insert(np.clone())
+            {
+                paths.push(np);
             }
         }
         paths.sort();
@@ -259,83 +262,26 @@ where
         }
     }
 
-    /// Search for notes matching a query. Returns deduplicated hits with scores.
+    /// Search for sections matching a query. Returns section-level hits with RRF scores.
     ///
-    /// Returns empty results when query is empty — use `list()` for listing.
+    /// Thin wrapper over the index — note-level grouping is the caller's concern.
     pub async fn search(
         &self,
         query: &str,
-        options: SearchOptions,
-    ) -> Result<CoreSearchResponse, CoreError> {
-        if query.is_empty() {
-            return Ok(CoreSearchResponse {
-                hits: Vec::new(),
-                total: 0,
-            });
-        }
+        params: SearchParams,
+    ) -> Result<Vec<SectionHit>, CoreError> {
+        let results = self.index.search(query, params).await?;
 
-        // Fetch sections from the index with adaptive sizing. Sections
-        // deduplicate to fewer notes, so we start at 4x and double until we
-        // have enough unique notes or the index is exhausted.
-        let target = options.limit + options.offset;
-        let mut multiplier = 4;
-        let mut note_hits: HashMap<VaultPath, (f32, Vec<Vec<String>>)>;
-
-        loop {
-            let index_limit = target * multiplier;
-            let params = SearchParams {
-                folder: options.folder.clone(),
-                tags: options.tags.clone(),
-                limit: index_limit,
-                offset: 0,
-            };
-
-            let search_results = self.index.search(query, params).await?;
-            let result_count = search_results.len();
-
-            // Deduplicate by note path, collect matching sections per note
-            note_hits = HashMap::new();
-            for (section, score) in search_results {
-                let entry = note_hits
-                    .entry(section.note_path.clone())
-                    .or_insert_with(|| (0.0, Vec::new()));
-                if score > entry.0 {
-                    entry.0 = score;
-                }
-                entry.1.push(section.heading_path);
-            }
-
-            // Enough unique notes, or index exhausted
-            if note_hits.len() >= target || result_count < index_limit {
-                break;
-            }
-            multiplier *= 2;
-        }
-
-        let mut hits: Vec<SearchHit> = note_hits
+        let hits: Vec<SectionHit> = results
             .into_iter()
-            .map(|(path, (score, sections))| SearchHit {
-                path,
+            .map(|(entry, score)| SectionHit {
+                path: entry.path,
                 score,
-                sections,
+                token_count: entry.token_count,
             })
             .collect();
 
-        // Sort by score descending
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let total = hits.len();
-        let hits: Vec<SearchHit> = hits
-            .into_iter()
-            .skip(options.offset)
-            .take(options.limit)
-            .collect();
-
-        Ok(CoreSearchResponse { hits, total })
+        Ok(hits)
     }
 
     /// Get tag entries, optionally filtered by prefix and folder.
@@ -348,11 +294,10 @@ where
         let mut tag_map: HashMap<String, HashSet<VaultPath>> = HashMap::new();
 
         for section in &sections {
-            for tag in &section.tags {
-                tag_map
-                    .entry(tag.clone())
-                    .or_default()
-                    .insert(section.note_path.clone());
+            if let Some(np) = section.path.note_path() {
+                for tag in &section.tags {
+                    tag_map.entry(tag.clone()).or_default().insert(np.clone());
+                }
             }
         }
 
@@ -383,8 +328,10 @@ where
         let mut seen = HashSet::new();
         let mut paths = Vec::new();
         for section in sections {
-            if seen.insert(section.note_path.clone()) {
-                paths.push(section.note_path);
+            if let Some(np) = section.path.note_path()
+                && seen.insert(np.clone())
+            {
+                paths.push(np);
             }
         }
         Ok(paths)
@@ -539,17 +486,17 @@ mod tests {
         core.write("note.md", "content", None).await.unwrap();
         core.rebuild_index().await.unwrap();
 
-        let result = core
+        let hits = core
             .search(
                 "",
-                SearchOptions {
+                SearchParams {
                     limit: 10,
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-        assert_eq!(result.total, 0);
+        assert!(hits.is_empty());
     }
 
     #[tokio::test]
@@ -560,18 +507,19 @@ mod tests {
             .unwrap();
         core.rebuild_index().await.unwrap();
 
-        let result = core
+        let hits = core
             .search(
                 "systems",
-                SearchOptions {
+                SearchParams {
                     limit: 10,
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-        assert_eq!(result.total, 1);
-        assert_eq!(result.hits[0].path.to_string(), "note.md");
+        assert!(!hits.is_empty());
+        // Section path should reference note.md
+        assert!(hits[0].path.to_string().starts_with("note.md"));
     }
 
     #[tokio::test]
