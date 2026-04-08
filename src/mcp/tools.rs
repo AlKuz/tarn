@@ -15,17 +15,15 @@ use crate::observer::Observer;
 use crate::storage::Storage;
 
 fn tool_success(response: &impl serde::Serialize) -> Result<CallToolResult, rmcp::ErrorData> {
-    let json = serde_json::to_string_pretty(response)
+    let value = serde_json::to_value(response)
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![rmcp::model::Content::text(
-        json,
-    )]))
+    Ok(CallToolResult::structured(value))
 }
 
 fn tool_error(e: impl std::fmt::Display) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::error(vec![rmcp::model::Content::text(
-        e.to_string(),
-    )]))
+    Ok(CallToolResult::structured_error(serde_json::json!({
+        "error": e.to_string()
+    })))
 }
 
 #[tool_router(vis = "pub(crate)")]

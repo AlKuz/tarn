@@ -88,8 +88,7 @@ pub async fn call_tool(client: &Client, name: &str, args: Value) -> Value {
             .map(|t| t.text.as_str())
             .unwrap_or("?")
     );
-    let text = &result.content[0].as_text().unwrap().text;
-    serde_json::from_str(text).unwrap()
+    result.structured_content.unwrap()
 }
 
 /// Call a tool expecting an error. Returns the error text.
