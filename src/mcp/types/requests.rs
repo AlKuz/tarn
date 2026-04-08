@@ -142,10 +142,18 @@ pub struct SearchParams {
         description = "Search query. Supports tag:name and folder:path inline filters. Omit to list notes."
     )]
     pub query: Option<SearchQuery>,
-    #[schemars(description = "Max note results (default: 20)")]
+    #[schemars(description = "Max section results (default: 20)")]
     pub limit: Option<usize>,
     #[schemars(description = "Max total tokens across all results")]
     pub token_limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(
+        description = "Minimum relevance score threshold (0.0–1.0). Sections below this are excluded. Default: 0.0"
+    )]
+    pub score_threshold: f32,
+    #[serde(default)]
+    #[schemars(description = "Return rendered markdown content grouped by note (default: false)")]
+    pub rendered: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

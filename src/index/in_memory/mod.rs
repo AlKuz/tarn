@@ -21,7 +21,7 @@ use crate::common::{Configurable, VaultPath};
 use crate::note_handler::Note;
 
 use super::config::InMemoryIndexConfig;
-use super::{Index, IndexEntry, IndexError, IndexLink, IndexMeta};
+use super::{Index, IndexEntry, IndexError, IndexLink, IndexMeta, NoteResult};
 
 // ---------------------------------------------------------------------------
 // InMemoryIndex errors
@@ -370,7 +370,8 @@ impl Index for InMemoryIndex {
         tags: &[String],
         limit: usize,
         token_limit: Option<usize>,
-    ) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
+        score_threshold: f32,
+    ) -> Result<Vec<NoteResult>, IndexError> {
         if query.is_empty() && tags.is_empty() && folders.is_empty() {
             return Ok(Vec::new());
         }
@@ -419,7 +420,10 @@ impl Index for InMemoryIndex {
                 .collect();
             results.sort_by(|a, b| a.0.path.cmp(&b.0.path));
             results = Self::apply_token_limit(results, limit, token_limit);
-            return Ok(results);
+            let scored: Vec<_> = results.into_iter().map(|(e, s)| (e, Some(s))).collect();
+            let mut notes = NoteResult::from_entries(&scored);
+            notes.sort_by(|a, b| a.path.cmp(&b.path));
+            return Ok(notes);
         }
 
         // Step 2: Score candidates through both pipelines
@@ -436,7 +440,7 @@ impl Index for InMemoryIndex {
         // Step 3: RRF fusion
         let fused = self.rrf.fuse(&[bm25_results, tag_results], limit);
 
-        // Step 4: Map to (IndexEntry, f32) and apply token limit
+        // Step 4: Map to (IndexEntry, f32), apply token limit, group by note
         let sections = self.sections.read().await;
         let results: Vec<(IndexEntry, f32)> = fused
             .into_iter()
@@ -446,17 +450,32 @@ impl Index for InMemoryIndex {
             })
             .collect();
 
-        Ok(Self::apply_token_limit(results, limit, token_limit))
+        let limited = Self::apply_token_limit(results, limit, token_limit);
+
+        // Apply score threshold before grouping
+        let filtered: Vec<_> = limited
+            .into_iter()
+            .filter(|(_, score)| *score >= score_threshold)
+            .collect();
+
+        let scored: Vec<_> = filtered.into_iter().map(|(e, s)| (e, Some(s))).collect();
+        let mut notes = NoteResult::from_entries(&scored);
+        notes.sort_by(|a, b| {
+            b.max_score()
+                .partial_cmp(&a.max_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(notes)
     }
 
     async fn list(
         &self,
         folder: Option<&VaultPath>,
         recursive: bool,
-    ) -> Result<Vec<IndexEntry>, IndexError> {
+    ) -> Result<Vec<NoteResult>, IndexError> {
         let sections = self.sections.read().await;
 
-        let result: Vec<IndexEntry> = sections
+        let entries: Vec<(IndexEntry, Option<f32>)> = sections
             .values()
             .filter(|entry| match folder {
                 None => true,
@@ -464,15 +483,18 @@ impl Index for InMemoryIndex {
                 Some(f) => entry.path.note_path().is_some_and(|np| np.is_in_folder(f)),
             })
             .cloned()
+            .map(|e| (e, None))
             .collect();
 
-        Ok(result)
+        let mut notes = NoteResult::from_entries(&entries);
+        notes.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(notes)
     }
 
-    async fn backlinks(&self, target: &str) -> Result<Vec<IndexEntry>, IndexError> {
+    async fn backlinks(&self, target: &str) -> Result<Vec<NoteResult>, IndexError> {
         let sections = self.sections.read().await;
 
-        let result: Vec<IndexEntry> = sections
+        let entries: Vec<(IndexEntry, Option<f32>)> = sections
             .values()
             .filter(|entry| {
                 entry.links.iter().any(|link| match link {
@@ -481,9 +503,12 @@ impl Index for InMemoryIndex {
                 })
             })
             .cloned()
+            .map(|e| (e, None))
             .collect();
 
-        Ok(result)
+        let mut notes = NoteResult::from_entries(&entries);
+        notes.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(notes)
     }
 
     async fn forward_links(&self, path: &VaultPath) -> Result<Vec<IndexLink>, IndexError> {
@@ -640,7 +665,7 @@ mod tests {
         index.update(&note2).await.unwrap();
 
         let results = index
-            .search("programming language", &[], &[], 10, None)
+            .search("programming language", &[], &[], 10, None, 0.0)
             .await
             .unwrap();
 
@@ -664,7 +689,7 @@ mod tests {
         index.update(&note2).await.unwrap();
 
         let results = index
-            .search("content", &[], &["rust".to_string()], 10, None)
+            .search("content", &[], &["rust".to_string()], 10, None, 0.0)
             .await
             .unwrap();
 
@@ -672,7 +697,7 @@ mod tests {
         assert!(
             results
                 .iter()
-                .all(|(e, _)| e.tags.contains(&"rust".to_string()))
+                .all(|r| r.tags().contains(&"rust".to_string()))
         );
     }
 
@@ -699,18 +724,17 @@ mod tests {
                 &[],
                 10,
                 None,
+                0.0,
             )
             .await
             .unwrap();
 
         assert!(!results.is_empty());
-        assert!(results.iter().all(|(e, _)| {
-            e.path
-                .note_path()
-                .unwrap()
-                .as_str()
-                .starts_with("projects/")
-        }));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.path.as_str().starts_with("projects/"))
+        );
     }
 
     #[tokio::test]
@@ -773,7 +797,7 @@ mod tests {
         let backlinks = index.backlinks("note2").await.unwrap();
 
         assert_eq!(backlinks.len(), 1);
-        assert_eq!(backlinks[0].path.note_path().unwrap().as_str(), "note1.md");
+        assert_eq!(backlinks[0].path.as_str(), "note1.md");
     }
 
     #[tokio::test]
@@ -796,7 +820,7 @@ mod tests {
         let note = make_note("note.md", "# Test\n\nContent.\n");
         index.update(&note).await.unwrap();
 
-        let results = index.search("", &[], &[], 10, None).await.unwrap();
+        let results = index.search("", &[], &[], 10, None, 0.0).await.unwrap();
 
         assert!(results.is_empty());
     }
@@ -813,7 +837,7 @@ mod tests {
 
         // Filter by parent tag "project" should match "project/alpha"
         let results = index
-            .search("alpha", &[], &["project".to_string()], 10, None)
+            .search("alpha", &[], &["project".to_string()], 10, None, 0.0)
             .await
             .unwrap();
 

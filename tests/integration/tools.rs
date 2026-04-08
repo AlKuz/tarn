@@ -16,10 +16,9 @@ async fn search_notes_basic() {
     )
     .await;
 
-    assert!(result["total"].as_u64().unwrap() > 0);
-    let paths: Vec<&str> = result["results"]
-        .as_array()
-        .unwrap()
+    let results = result.as_array().unwrap();
+    assert!(!results.is_empty());
+    let paths: Vec<&str> = results
         .iter()
         .map(|r| r["path"].as_str().unwrap())
         .collect();
@@ -43,7 +42,10 @@ async fn search_case_insensitive() {
     )
     .await;
 
-    assert_eq!(lower["total"], upper["total"]);
+    assert_eq!(
+        lower.as_array().unwrap().len(),
+        upper.as_array().unwrap().len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -58,7 +60,7 @@ async fn search_within_folder() {
     )
     .await;
 
-    for r in result["results"].as_array().unwrap() {
+    for r in result.as_array().unwrap() {
         assert!(r["path"].as_str().unwrap().starts_with("wiki/"));
     }
 }
@@ -75,14 +77,17 @@ async fn search_by_tag_filter() {
     )
     .await;
 
-    assert!(result["total"].as_u64().unwrap() >= 2);
-    for r in result["results"].as_array().unwrap() {
-        assert!(
-            r["tags"]
+    let results = result.as_array().unwrap();
+    assert!(results.len() >= 2);
+    for r in results {
+        // Tags are on individual sections in NoteResult
+        let has_tag = r["sections"].as_array().unwrap().iter().any(|s| {
+            s["tags"]
                 .as_array()
                 .unwrap()
                 .contains(&Value::String("programming/web".to_string()))
-        );
+        });
+        assert!(has_tag);
     }
 }
 
@@ -97,7 +102,7 @@ async fn search_limit() {
         json!({"query": "project", "limit": 100}),
     )
     .await;
-    let total = all["total"].as_u64().unwrap();
+    let total = all.as_array().unwrap().len();
     assert!(total >= 3, "need at least 3 results for limit test");
 
     // Limit to 2 results
@@ -108,7 +113,7 @@ async fn search_limit() {
     )
     .await;
 
-    assert_eq!(limited["results"].as_array().unwrap().len(), 2);
+    assert_eq!(limited.as_array().unwrap().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -123,10 +128,66 @@ async fn search_in_nested_folder() {
     )
     .await;
 
-    assert!(result["total"].as_u64().unwrap() >= 1);
-    for r in result["results"].as_array().unwrap() {
+    let results = result.as_array().unwrap();
+    assert!(!results.is_empty());
+    for r in results {
         assert!(r["path"].as_str().unwrap().starts_with("projects/webapp/"));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_rendered_mode() {
+    let server = spawn_server(false).await;
+
+    let result = call_tool_text(
+        &server.client,
+        "tarn_search_notes",
+        json!({"query": "Rust", "rendered": true}),
+    )
+    .await;
+
+    // Should be markdown with HTML comment metadata
+    assert!(
+        result.contains("<!-- wiki/Rust.md |"),
+        "expected HTML comment metadata with note path"
+    );
+    // Should have section content with headings
+    assert!(result.contains("## "), "expected section headers");
+    // Should include scores in metadata comment
+    assert!(
+        result.contains("| score:"),
+        "expected scores in rendered output"
+    );
+    // Should include token counts
+    assert!(
+        result.contains("| tokens:"),
+        "expected token counts in rendered output"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_rendered_mode_no_scores_for_filter_only() {
+    let server = spawn_server(false).await;
+
+    // Filter-only query (tag only, no text)
+    let result = call_tool_text(
+        &server.client,
+        "tarn_search_notes",
+        json!({"query": "tag:daily", "rendered": true}),
+    )
+    .await;
+
+    // Should have markdown with HTML comment metadata
+    assert!(result.contains("<!-- "), "expected HTML comment metadata");
+    // Should have token counts but NO scores (filter-only mode)
+    assert!(
+        result.contains("| tokens:"),
+        "expected token counts in metadata"
+    );
+    assert!(
+        !result.contains("| score:"),
+        "filter-only mode should not include scores"
+    );
 }
 
 // =============================================================================
@@ -430,10 +491,9 @@ async fn search_with_index() {
     )
     .await;
 
-    assert!(result["total"].as_u64().unwrap() > 0);
-    let paths: Vec<&str> = result["results"]
-        .as_array()
-        .unwrap()
+    let results = result.as_array().unwrap();
+    assert!(!results.is_empty());
+    let paths: Vec<&str> = results
         .iter()
         .map(|r| r["path"].as_str().unwrap())
         .collect();

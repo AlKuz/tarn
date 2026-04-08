@@ -1,29 +1,35 @@
-use std::collections::HashMap;
-
 use regex::RegexBuilder;
-use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
+use rmcp::{
+    handler::server::wrapper::Parameters,
+    model::{CallToolResult, Content},
+    tool, tool_router,
+};
 
 use super::TarnMcpServer;
 use super::types::{
-    CreateNoteParams, GetTagsParams, GetTagsResponse, ReplaceInNoteParams, SearchParams,
-    SearchResponse, SearchResult, SectionScore, TagInfo, UpdateNoteParams, WriteNoteResponse,
+    CreateNoteParams, GetTagsParams, GetTagsResponse, RenderMarkdown, ReplaceInNoteParams,
+    SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse,
 };
 use crate::common::RevisionToken;
 use crate::core::responses::ReplaceMode;
-use crate::index::Index;
+use crate::index::{Index, NoteResult};
 use crate::observer::Observer;
 use crate::storage::Storage;
 
-fn tool_success(response: &impl serde::Serialize) -> Result<CallToolResult, rmcp::ErrorData> {
+fn tool_json(
+    response: &(impl serde::Serialize + ?Sized),
+) -> Result<CallToolResult, rmcp::ErrorData> {
     let value = serde_json::to_value(response)
         .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
     Ok(CallToolResult::structured(value))
 }
 
+fn tool_text(text: String) -> Result<CallToolResult, rmcp::ErrorData> {
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
 fn tool_error(e: impl std::fmt::Display) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::structured_error(serde_json::json!({
-        "error": e.to_string()
-    })))
+    Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
 }
 
 #[tool_router(vis = "pub(crate)")]
@@ -34,7 +40,7 @@ where
     O: Observer + Send + Sync + 'static,
 {
     #[tool(
-        description = "Search across the vault or list notes. When query is provided, returns notes ranked by relevance with section scores. When query is omitted, lists notes in a folder."
+        description = "Search across the vault. Returns notes ranked by relevance with section scores. Supports text search, tag filters (tag:name), and folder filters (folder:path). Set rendered=true to get markdown content instead of JSON."
     )]
     async fn tarn_search_notes(
         &self,
@@ -47,227 +53,49 @@ where
             .query
             .filter(|q| !q.text.trim().is_empty() || !q.tags.is_empty() || !q.folders.is_empty());
 
-        match query {
-            Some(q) if !q.text.is_empty() => {
-                // Search mode: score and group by note
-                match self
-                    .core
-                    .search(
-                        &q.text,
-                        &q.folders,
-                        &q.tags,
-                        limit * 4, // Over-fetch sections for note dedup
-                        params.token_limit,
-                    )
-                    .await
-                {
-                    Ok(section_hits) => {
-                        // Group sections by note
-                        let mut note_groups: HashMap<String, (f32, usize, Vec<SectionScore>)> =
-                            HashMap::new();
+        let Some(q) = query else {
+            // No query provided — return empty results
+            return if params.rendered {
+                tool_text(String::new())
+            } else {
+                tool_json(&Vec::<NoteResult>::new())
+            };
+        };
 
-                        for hit in &section_hits {
-                            let note_path = hit
-                                .path
-                                .note_path()
-                                .map(|p| p.to_string())
-                                .unwrap_or_else(|| hit.path.to_string());
-
-                            let heading_path: Vec<String> = hit
-                                .path
-                                .section_headings()
-                                .into_iter()
-                                .map(|s| s.to_string())
-                                .collect();
-
-                            let entry = note_groups
-                                .entry(note_path)
-                                .or_insert_with(|| (0.0, 0, Vec::new()));
-
-                            if hit.score > entry.0 {
-                                entry.0 = hit.score;
-                            }
-                            entry.1 += hit.token_count;
-                            entry.2.push(SectionScore {
-                                heading_path,
-                                score: hit.score,
-                            });
+        match self
+            .core
+            .search(
+                &q.text,
+                &q.folders,
+                &q.tags,
+                limit,
+                params.token_limit,
+                params.score_threshold,
+            )
+            .await
+        {
+            Ok(mut results) => {
+                // Filter-only mode: scores are meaningless without a text query
+                if q.text.is_empty() {
+                    for nr in &mut results {
+                        for s in &mut nr.sections {
+                            s.score = None;
                         }
-
-                        // Sort notes by max score descending
-                        let mut note_entries: Vec<_> = note_groups.into_iter().collect();
-                        note_entries.sort_by(|a, b| {
-                            b.1.0
-                                .partial_cmp(&a.1.0)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        note_entries.truncate(limit);
-
-                        // Apply token_limit and enrich with note metadata
-                        let mut results = Vec::new();
-                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
-
-                        for (path_str, (score, token_count, sections)) in note_entries {
-                            if token_budget == 0 {
-                                break;
-                            }
-
-                            let (title, tags) = match self.core.read(&path_str).await {
-                                Ok((note, _)) => {
-                                    let tags: Vec<String> =
-                                        note.tags().into_iter().map(String::from).collect();
-                                    (note.title.clone(), tags)
-                                }
-                                Err(_) => (None, Vec::new()),
-                            };
-
-                            let use_tokens = token_count.min(token_budget);
-                            token_budget = token_budget.saturating_sub(use_tokens);
-
-                            results.push(SearchResult {
-                                path: path_str,
-                                title,
-                                score: Some(score),
-                                tags,
-                                token_count: use_tokens,
-                                relevant_sections: Some(sections),
-                            });
-                        }
-
-                        let response = SearchResponse {
-                            total: results.len(),
-                            results,
-                        };
-                        tool_success(&response)
                     }
-                    Err(e) => tool_error(e),
+                }
+                if params.rendered {
+                    let mut loaded = Vec::new();
+                    for nr in &results {
+                        if let Ok((note, _)) = self.core.read(&nr.path.to_string()).await {
+                            loaded.push(note);
+                        }
+                    }
+                    tool_text(RenderMarkdown::new(&results, &loaded).render())
+                } else {
+                    tool_json(&results)
                 }
             }
-            Some(q) => {
-                // Filter-only mode: query has tags/folders but no text
-                match self
-                    .core
-                    .search("", &q.folders, &q.tags, limit * 4, params.token_limit)
-                    .await
-                {
-                    Ok(section_hits) => {
-                        // Group sections by note (scores are uniform 1.0)
-                        let mut note_groups: HashMap<String, (usize, Vec<SectionScore>)> =
-                            HashMap::new();
-
-                        for hit in &section_hits {
-                            let note_path = hit
-                                .path
-                                .note_path()
-                                .map(|p| p.to_string())
-                                .unwrap_or_else(|| hit.path.to_string());
-
-                            let heading_path: Vec<String> = hit
-                                .path
-                                .section_headings()
-                                .into_iter()
-                                .map(|s| s.to_string())
-                                .collect();
-
-                            let entry = note_groups
-                                .entry(note_path)
-                                .or_insert_with(|| (0, Vec::new()));
-                            entry.0 += hit.token_count;
-                            entry.1.push(SectionScore {
-                                heading_path,
-                                score: hit.score,
-                            });
-                        }
-
-                        // Sort by path for deterministic order
-                        let mut note_entries: Vec<_> = note_groups.into_iter().collect();
-                        note_entries.sort_by(|a, b| a.0.cmp(&b.0));
-                        note_entries.truncate(limit);
-
-                        // Apply token_limit and enrich with note metadata
-                        let mut results = Vec::new();
-                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
-
-                        for (path_str, (token_count, sections)) in note_entries {
-                            if token_budget == 0 {
-                                break;
-                            }
-
-                            let (title, tags) = match self.core.read(&path_str).await {
-                                Ok((note, _)) => {
-                                    let tags: Vec<String> =
-                                        note.tags().into_iter().map(String::from).collect();
-                                    (note.title.clone(), tags)
-                                }
-                                Err(_) => (None, Vec::new()),
-                            };
-
-                            let use_tokens = token_count.min(token_budget);
-                            token_budget = token_budget.saturating_sub(use_tokens);
-
-                            results.push(SearchResult {
-                                path: path_str,
-                                title,
-                                score: None, // No relevance score for filter-only
-                                tags,
-                                token_count: use_tokens,
-                                relevant_sections: Some(sections),
-                            });
-                        }
-
-                        let response = SearchResponse {
-                            total: results.len(),
-                            results,
-                        };
-                        tool_success(&response)
-                    }
-                    Err(e) => tool_error(e),
-                }
-            }
-            None => {
-                // List mode: no query, no filters
-                match self.core.list(None, true).await {
-                    Ok(paths) => {
-                        let mut results = Vec::new();
-                        let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
-
-                        for path in paths.iter().take(limit) {
-                            if token_budget == 0 {
-                                break;
-                            }
-
-                            let path_str = path.to_string();
-                            match self.core.read(&path_str).await {
-                                Ok((note, _)) => {
-                                    let tags: Vec<String> =
-                                        note.tags().into_iter().map(String::from).collect();
-                                    let token_count = note.word_count(); // approximate
-
-                                    let use_tokens = token_count.min(token_budget);
-                                    token_budget = token_budget.saturating_sub(use_tokens);
-
-                                    results.push(SearchResult {
-                                        path: path_str,
-                                        title: note.title.clone(),
-                                        score: None,
-                                        tags,
-                                        token_count: use_tokens,
-                                        relevant_sections: None,
-                                    });
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-
-                        let response = SearchResponse {
-                            total: results.len(),
-                            results,
-                        };
-                        tool_success(&response)
-                    }
-                    Err(e) => tool_error(e),
-                }
-            }
+            Err(e) => tool_error(e),
         }
     }
 
@@ -296,7 +124,7 @@ where
                     })
                     .collect();
                 let response = GetTagsResponse { tags };
-                tool_success(&response)
+                tool_json(&response)
             }
             Err(e) => tool_error(e),
         }
@@ -313,7 +141,7 @@ where
                     path: params.path,
                     revision,
                 };
-                tool_success(&response)
+                tool_json(&response)
             }
             Err(e) => tool_error(e),
         }
@@ -337,7 +165,7 @@ where
                     path: params.path,
                     revision: new_revision,
                 };
-                tool_success(&response)
+                tool_json(&response)
             }
             Err(e) => tool_error(e),
         }
@@ -393,7 +221,7 @@ where
                     path: params.path,
                     revision: new_revision,
                 };
-                tool_success(&response)
+                tool_json(&response)
             }
             Err(e) => tool_error(e),
         }

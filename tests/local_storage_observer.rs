@@ -294,7 +294,7 @@ mod index_sync {
 
         // Verify index was updated via search
         let results = core
-            .search("rust programming", &[], &[], 10, None)
+            .search("rust programming", &[], &[], 10, None, 0.0)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -323,7 +323,10 @@ mod index_sync {
         core.rebuild_index().await.unwrap();
 
         // Verify initial content is indexed
-        let results = core.search("apples", &[], &[], 10, None).await.unwrap();
+        let results = core
+            .search("apples", &[], &[], 10, None, 0.0)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         let _handle = core.start_index_sync();
@@ -340,10 +343,16 @@ mod index_sync {
         tokio::time::sleep(Duration::from_millis(SYNC_WAIT_MS)).await;
 
         // Verify old content is gone, new content is indexed
-        let old_results = core.search("apples", &[], &[], 10, None).await.unwrap();
+        let old_results = core
+            .search("apples", &[], &[], 10, None, 0.0)
+            .await
+            .unwrap();
         assert!(old_results.is_empty());
 
-        let new_results = core.search("oranges", &[], &[], 10, None).await.unwrap();
+        let new_results = core
+            .search("oranges", &[], &[], 10, None, 0.0)
+            .await
+            .unwrap();
         assert_eq!(new_results.len(), 1);
     }
 
@@ -369,7 +378,10 @@ mod index_sync {
         core.rebuild_index().await.unwrap();
 
         // Verify file is indexed
-        let results = core.search("deleteme", &[], &[], 10, None).await.unwrap();
+        let results = core
+            .search("deleteme", &[], &[], 10, None, 0.0)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         let _handle = core.start_index_sync();
@@ -383,7 +395,10 @@ mod index_sync {
         tokio::time::sleep(Duration::from_millis(SYNC_WAIT_MS)).await;
 
         // Verify file is no longer in index
-        let results = core.search("deleteme", &[], &[], 10, None).await.unwrap();
+        let results = core
+            .search("deleteme", &[], &[], 10, None, 0.0)
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 

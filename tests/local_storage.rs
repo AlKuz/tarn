@@ -1055,7 +1055,7 @@ mod crlf_support {
         core.rebuild_index().await.unwrap();
 
         let results = core
-            .search("unique_term_123", &[], &[], 10, None)
+            .search("unique_term_123", &[], &[], 10, None, 0.0)
             .await
             .unwrap();
 

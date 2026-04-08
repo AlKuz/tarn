@@ -8,9 +8,9 @@ use tracing::{debug, info, warn};
 
 use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::core::config::TarnConfig;
-use crate::core::responses::{SectionHit, TagEntry};
+use crate::core::responses::TagEntry;
 use crate::index::find_direct_children;
-use crate::index::{Index, IndexError, IndexLink};
+use crate::index::{Index, IndexError, IndexLink, NoteResult};
 use crate::note_handler::{Note, Section};
 use crate::observer::{Observer, ObserverError, StorageEvent};
 use crate::storage::{FileContent, Storage, StorageError};
@@ -237,16 +237,8 @@ where
         folder: Option<&VaultPath>,
         recursive: bool,
     ) -> Result<Vec<VaultPath>, CoreError> {
-        let sections = self.index.list(folder, recursive).await?;
-        let mut seen = HashSet::new();
-        let mut paths = Vec::new();
-        for section in sections {
-            if let Some(np) = section.path.note_path()
-                && seen.insert(np.clone())
-            {
-                paths.push(np);
-            }
-        }
+        let results = self.index.list(folder, recursive).await?;
+        let mut paths: Vec<VaultPath> = results.into_iter().map(|r| r.path).collect();
         paths.sort();
         Ok(paths)
     }
@@ -262,9 +254,9 @@ where
         }
     }
 
-    /// Search for sections matching a query. Returns section-level hits with RRF scores.
+    /// Search for notes matching a query. Returns note-level results with scores.
     ///
-    /// Thin wrapper over the index — note-level grouping is the caller's concern.
+    /// Thin wrapper over the index.
     pub async fn search(
         &self,
         query: &str,
@@ -272,22 +264,13 @@ where
         tags: &[String],
         limit: usize,
         token_limit: Option<usize>,
-    ) -> Result<Vec<SectionHit>, CoreError> {
+        score_threshold: f32,
+    ) -> Result<Vec<NoteResult>, CoreError> {
         let results = self
             .index
-            .search(query, folders, tags, limit, token_limit)
+            .search(query, folders, tags, limit, token_limit, score_threshold)
             .await?;
-
-        let hits: Vec<SectionHit> = results
-            .into_iter()
-            .map(|(entry, score)| SectionHit {
-                path: entry.path,
-                score,
-                token_count: entry.token_count,
-            })
-            .collect();
-
-        Ok(hits)
+        Ok(results)
     }
 
     /// Get tag entries, optionally filtered by prefix and folder.
@@ -296,14 +279,12 @@ where
         prefix: Option<&str>,
         folder: Option<&VaultPath>,
     ) -> Result<Vec<TagEntry>, CoreError> {
-        let sections = self.index.list(folder, true).await?;
+        let results = self.index.list(folder, true).await?;
         let mut tag_map: HashMap<String, HashSet<VaultPath>> = HashMap::new();
 
-        for section in &sections {
-            if let Some(np) = section.path.note_path() {
-                for tag in &section.tags {
-                    tag_map.entry(tag.clone()).or_default().insert(np.clone());
-                }
+        for result in &results {
+            for tag in result.tags() {
+                tag_map.entry(tag).or_default().insert(result.path.clone());
             }
         }
 
@@ -330,17 +311,8 @@ where
 
     /// Get note paths that link to the given target.
     pub async fn backlinks(&self, target: &str) -> Result<Vec<VaultPath>, CoreError> {
-        let sections = self.index.backlinks(target).await?;
-        let mut seen = HashSet::new();
-        let mut paths = Vec::new();
-        for section in sections {
-            if let Some(np) = section.path.note_path()
-                && seen.insert(np.clone())
-            {
-                paths.push(np);
-            }
-        }
-        Ok(paths)
+        let results = self.index.backlinks(target).await?;
+        Ok(results.into_iter().map(|r| r.path).collect())
     }
 
     /// Get all links from a note.
@@ -492,7 +464,7 @@ mod tests {
         core.write("note.md", "content", None).await.unwrap();
         core.rebuild_index().await.unwrap();
 
-        let hits = core.search("", &[], &[], 10, None).await.unwrap();
+        let hits = core.search("", &[], &[], 10, None, 0.0).await.unwrap();
         assert!(hits.is_empty());
     }
 
@@ -504,9 +476,11 @@ mod tests {
             .unwrap();
         core.rebuild_index().await.unwrap();
 
-        let hits = core.search("systems", &[], &[], 10, None).await.unwrap();
+        let hits = core
+            .search("systems", &[], &[], 10, None, 0.0)
+            .await
+            .unwrap();
         assert!(!hits.is_empty());
-        // Section path should reference note.md
         assert!(hits[0].path.to_string().starts_with("note.md"));
     }
 

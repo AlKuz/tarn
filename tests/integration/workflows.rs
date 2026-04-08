@@ -17,11 +17,10 @@ async fn search_read_follow_links() {
         json!({"query": "Rust"}),
     )
     .await;
-    assert!(search["total"].as_u64().unwrap() > 0);
+    let results = search.as_array().unwrap();
+    assert!(!results.is_empty());
 
-    let paths: Vec<&str> = search["results"]
-        .as_array()
-        .unwrap()
+    let paths: Vec<&str> = results
         .iter()
         .map(|r| r["path"].as_str().unwrap())
         .collect();
@@ -68,10 +67,11 @@ async fn project_exploration_workflow() {
         json!({"query": "project", "folder": "projects", "limit": 50}),
     )
     .await;
-    assert!(search["total"].as_u64().unwrap() >= 1);
+    let results = search.as_array().unwrap();
+    assert!(!results.is_empty());
 
     // Step 4: Read each note via resource
-    for result in search["results"].as_array().unwrap() {
+    for result in results {
         let path = result["path"].as_str().unwrap();
         let note = read_resource(&server.client, &format!("tarn://note/{path}")).await;
         assert!(note["content"].as_str().is_some());
@@ -149,7 +149,7 @@ async fn full_research_session() {
 
     // Step 2: Search for "API"
     let search = call_tool(&server.client, "tarn_search_notes", json!({"query": "API"})).await;
-    assert!(search["total"].as_u64().unwrap() > 0);
+    assert!(!search.as_array().unwrap().is_empty());
 
     // Step 3: Read REST API note via resource
     let note = read_resource(&server.client, "tarn://note/wiki/REST API.md").await;
