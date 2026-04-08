@@ -10,7 +10,7 @@ use crate::common::{Configurable, RevisionToken, VaultPath};
 use crate::core::config::TarnConfig;
 use crate::core::responses::{SectionHit, TagEntry};
 use crate::index::find_direct_children;
-use crate::index::{Index, IndexError, IndexLink, SearchParams};
+use crate::index::{Index, IndexError, IndexLink};
 use crate::note_handler::{Note, Section};
 use crate::observer::{Observer, ObserverError, StorageEvent};
 use crate::storage::{FileContent, Storage, StorageError};
@@ -268,9 +268,15 @@ where
     pub async fn search(
         &self,
         query: &str,
-        params: SearchParams,
+        folders: &[VaultPath],
+        tags: &[String],
+        limit: usize,
+        token_limit: Option<usize>,
     ) -> Result<Vec<SectionHit>, CoreError> {
-        let results = self.index.search(query, params).await?;
+        let results = self
+            .index
+            .search(query, folders, tags, limit, token_limit)
+            .await?;
 
         let hits: Vec<SectionHit> = results
             .into_iter()
@@ -486,16 +492,7 @@ mod tests {
         core.write("note.md", "content", None).await.unwrap();
         core.rebuild_index().await.unwrap();
 
-        let hits = core
-            .search(
-                "",
-                SearchParams {
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        let hits = core.search("", &[], &[], 10, None).await.unwrap();
         assert!(hits.is_empty());
     }
 
@@ -507,16 +504,7 @@ mod tests {
             .unwrap();
         core.rebuild_index().await.unwrap();
 
-        let hits = core
-            .search(
-                "systems",
-                SearchParams {
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        let hits = core.search("systems", &[], &[], 10, None).await.unwrap();
         assert!(!hits.is_empty());
         // Section path should reference note.md
         assert!(hits[0].path.to_string().starts_with("note.md"));

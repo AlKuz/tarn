@@ -50,10 +50,11 @@ async fn search_case_insensitive() {
 async fn search_within_folder() {
     let server = spawn_server(false).await;
 
+    // Use inline folder: filter syntax
     let result = call_tool(
         &server.client,
         "tarn_search_notes",
-        json!({"query": "Rust", "folder": "wiki"}),
+        json!({"query": "Rust folder:wiki"}),
     )
     .await;
 
@@ -66,10 +67,11 @@ async fn search_within_folder() {
 async fn search_by_tag_filter() {
     let server = spawn_server(false).await;
 
+    // Use inline tag: filter syntax
     let result = call_tool(
         &server.client,
         "tarn_search_notes",
-        json!({"query": "web", "tag_filter": ["programming/web"], "limit": 50}),
+        json!({"query": "web tag:programming/web", "limit": 50}),
     )
     .await;
 
@@ -113,10 +115,11 @@ async fn search_limit() {
 async fn search_in_nested_folder() {
     let server = spawn_server(false).await;
 
+    // Use inline folder: filter syntax
     let result = call_tool(
         &server.client,
         "tarn_search_notes",
-        json!({"query": "API", "folder": "projects/webapp"}),
+        json!({"query": "API folder:projects/webapp"}),
     )
     .await;
 

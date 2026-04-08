@@ -18,23 +18,6 @@ use crate::common::{RevisionToken, VaultPath};
 use crate::note_handler::Note;
 
 // ---------------------------------------------------------------------------
-// Search parameters
-// ---------------------------------------------------------------------------
-
-/// Parameters for search queries.
-#[derive(Debug, Clone, Default)]
-pub struct SearchParams {
-    /// Hard filter: limit results to notes under these folders.
-    /// Empty means no folder filter.
-    pub folders: Vec<VaultPath>,
-    /// Hard filter: limit results to sections with at least one of these tags.
-    /// Empty means no tag filter.
-    pub tags: Vec<String>,
-    /// Maximum number of section results to return.
-    pub limit: usize,
-}
-
-// ---------------------------------------------------------------------------
 // Index link types
 // ---------------------------------------------------------------------------
 
@@ -159,11 +142,15 @@ pub trait Index: Send + Sync {
 
     /// Search for sections matching a query string.
     ///
-    /// Returns sections with BM25 relevance scores, filtered by `SearchParams`.
+    /// Returns sections with BM25 relevance scores, filtered by folders and tags.
+    /// The `token_limit` caps total tokens across all results.
     fn search(
         &self,
         query: &str,
-        params: SearchParams,
+        folders: &[VaultPath],
+        tags: &[String],
+        limit: usize,
+        token_limit: Option<usize>,
     ) -> impl Future<Output = Result<Vec<(IndexEntry, f32)>, IndexError>> + Send;
 
     /// List all sections, optionally filtered by folder.

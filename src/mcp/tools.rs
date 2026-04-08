@@ -2,73 +2,17 @@ use std::collections::HashMap;
 
 use regex::RegexBuilder;
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
-use schemars::JsonSchema;
 
 use super::TarnMcpServer;
-use super::helpers::parse_folder;
-use super::responses::{SearchResponse, SearchResult, SectionScore, WriteNoteResponse};
+use super::types::{
+    CreateNoteParams, GetTagsParams, GetTagsResponse, ReplaceInNoteParams, SearchParams,
+    SearchResponse, SearchResult, SectionScore, TagInfo, UpdateNoteParams, WriteNoteResponse,
+};
 use crate::common::RevisionToken;
 use crate::core::responses::ReplaceMode;
-use crate::index::{Index, SearchParams};
-use crate::mcp::query::ParsedQuery;
+use crate::index::Index;
 use crate::observer::Observer;
 use crate::storage::Storage;
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct SearchNotesParams {
-    #[schemars(
-        description = "Search query. Supports tag:name and folder:path inline filters. Omit to list notes."
-    )]
-    pub query: Option<String>,
-    #[schemars(description = "Restrict to folder path")]
-    pub folder: Option<String>,
-    #[schemars(description = "Notes must have at least one of these tags")]
-    pub tag_filter: Option<Vec<String>>,
-    #[schemars(description = "Max note results (default: 20)")]
-    pub limit: Option<usize>,
-    #[schemars(description = "Max total tokens across all results")]
-    pub token_limit: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct GetTagsParams {
-    #[schemars(description = "Filter tags by prefix (e.g. \"project/\")")]
-    pub prefix: Option<String>,
-    #[schemars(description = "Include list of notes per tag (default: false)")]
-    pub include_notes: Option<bool>,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct CreateNoteParams {
-    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
-    pub path: String,
-    #[schemars(description = "Markdown content for the new note")]
-    pub content: String,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct UpdateNoteParams {
-    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
-    pub path: String,
-    #[schemars(description = "New markdown content for the note")]
-    pub content: String,
-    #[schemars(description = "Revision token from a prior read for conflict detection")]
-    pub revision: String,
-}
-
-#[derive(Debug, serde::Deserialize, JsonSchema)]
-pub struct ReplaceInNoteParams {
-    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
-    pub path: String,
-    #[schemars(description = "Text or regex pattern to find")]
-    pub old: String,
-    #[schemars(description = "Replacement text")]
-    pub new: String,
-    #[schemars(description = "Replacement mode: \"first\" (default), \"all\", or \"regex\"")]
-    pub mode: Option<String>,
-    #[schemars(description = "Revision token from a prior read for conflict detection")]
-    pub revision: String,
-}
 
 fn tool_success(response: &impl serde::Serialize) -> Result<CallToolResult, rmcp::ErrorData> {
     let json = serde_json::to_string_pretty(response)
@@ -96,37 +40,29 @@ where
     )]
     async fn tarn_search_notes(
         &self,
-        Parameters(params): Parameters<SearchNotesParams>,
+        Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let limit = params.limit.unwrap_or(20);
 
-        // Normalize: whitespace-only becomes None
-        let query = params.query.filter(|q| !q.trim().is_empty());
-        let has_tag_filter = params.tag_filter.as_ref().is_some_and(|t| !t.is_empty());
+        // Normalize: whitespace-only query with no filters becomes None
+        let query = params
+            .query
+            .filter(|q| !q.text.trim().is_empty() || !q.tags.is_empty() || !q.folders.is_empty());
 
         match query {
-            Some(q) => {
-                // Search mode: parse query, score, group by note
-                let parsed = ParsedQuery::from(q);
-
-                // Merge inline filters with explicit params
-                let mut folders = parsed.folders;
-                if let Some(folder) = parse_folder(params.folder.as_deref())? {
-                    folders.push(folder);
-                }
-
-                let mut tags = parsed.tags;
-                if let Some(filter_tags) = params.tag_filter {
-                    tags.extend(filter_tags);
-                }
-
-                let search_params = SearchParams {
-                    folders,
-                    tags,
-                    limit: limit * 4, // Over-fetch sections for note dedup
-                };
-
-                match self.core.search(&parsed.text, search_params).await {
+            Some(q) if !q.text.is_empty() => {
+                // Search mode: score and group by note
+                match self
+                    .core
+                    .search(
+                        &q.text,
+                        &q.folders,
+                        &q.tags,
+                        limit * 4, // Over-fetch sections for note dedup
+                        params.token_limit,
+                    )
+                    .await
+                {
                     Ok(section_hits) => {
                         // Group sections by note
                         let mut note_groups: HashMap<String, (f32, usize, Vec<SectionScore>)> =
@@ -209,19 +145,13 @@ where
                     Err(e) => tool_error(e),
                 }
             }
-            None if has_tag_filter => {
-                // Tag-filter-only mode: route through search with empty text
-                let folders = match parse_folder(params.folder.as_deref())? {
-                    Some(f) => vec![f],
-                    None => vec![],
-                };
-                let search_params = SearchParams {
-                    folders,
-                    tags: params.tag_filter.unwrap_or_default(),
-                    limit: limit * 4,
-                };
-
-                match self.core.search("", search_params).await {
+            Some(q) => {
+                // Filter-only mode: query has tags/folders but no text
+                match self
+                    .core
+                    .search("", &q.folders, &q.tags, limit * 4, params.token_limit)
+                    .await
+                {
                     Ok(section_hits) => {
                         // Group sections by note (scores are uniform 1.0)
                         let mut note_groups: HashMap<String, (usize, Vec<SectionScore>)> =
@@ -298,8 +228,7 @@ where
             }
             None => {
                 // List mode: no query, no filters
-                let folder = parse_folder(params.folder.as_deref())?;
-                match self.core.list(folder.as_ref(), true).await {
+                match self.core.list(None, true).await {
                     Ok(paths) => {
                         let mut results = Vec::new();
                         let mut token_budget = params.token_limit.unwrap_or(usize::MAX);
@@ -355,9 +284,9 @@ where
 
         match self.core.tags(params.prefix.as_deref(), None).await {
             Ok(entries) => {
-                let tags: Vec<super::responses::TagInfo> = entries
+                let tags: Vec<TagInfo> = entries
                     .into_iter()
-                    .map(|e| super::responses::TagInfo {
+                    .map(|e| TagInfo {
                         tag: e.tag,
                         count: e.count,
                         children: e.children,
@@ -368,7 +297,7 @@ where
                         },
                     })
                     .collect();
-                let response = super::responses::GetTagsResponse { tags };
+                let response = GetTagsResponse { tags };
                 tool_success(&response)
             }
             Err(e) => tool_error(e),

@@ -21,7 +21,7 @@ use crate::common::{Configurable, VaultPath};
 use crate::note_handler::Note;
 
 use super::config::InMemoryIndexConfig;
-use super::{Index, IndexEntry, IndexError, IndexLink, IndexMeta, SearchParams};
+use super::{Index, IndexEntry, IndexError, IndexLink, IndexMeta};
 
 // ---------------------------------------------------------------------------
 // InMemoryIndex errors
@@ -254,6 +254,31 @@ impl InMemoryIndex {
         }
     }
 
+    /// Apply token limit to search results.
+    fn apply_token_limit(
+        mut results: Vec<(IndexEntry, f32)>,
+        limit: usize,
+        token_limit: Option<usize>,
+    ) -> Vec<(IndexEntry, f32)> {
+        results.truncate(limit);
+
+        let Some(max_tokens) = token_limit else {
+            return results;
+        };
+
+        let mut total_tokens = 0;
+        let mut cutoff_idx = results.len();
+        for (i, (entry, _)) in results.iter().enumerate() {
+            total_tokens += entry.token_count;
+            if total_tokens > max_tokens {
+                cutoff_idx = i + 1; // Include this entry but stop after
+                break;
+            }
+        }
+        results.truncate(cutoff_idx);
+        results
+    }
+
     /// Remove all sections for a note path.
     async fn remove_note_sections_inner(&self, note_path: &VaultPath) {
         let section_paths: Vec<VaultPath> = {
@@ -335,9 +360,12 @@ impl Index for InMemoryIndex {
     async fn search(
         &self,
         query: &str,
-        params: SearchParams,
+        folders: &[VaultPath],
+        tags: &[String],
+        limit: usize,
+        token_limit: Option<usize>,
     ) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
-        if query.is_empty() && params.tags.is_empty() && params.folders.is_empty() {
+        if query.is_empty() && tags.is_empty() && folders.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -346,18 +374,18 @@ impl Index for InMemoryIndex {
             let data = self.data.read().await;
             let tag_index = self.tag_index.read().await;
 
-            let mut candidates: HashSet<VaultPath> = if !params.tags.is_empty() {
-                let expanded_tags = tag_index.expand_hierarchical(&params.tags);
+            let mut candidates: HashSet<VaultPath> = if !tags.is_empty() {
+                let expanded_tags = tag_index.expand_hierarchical(tags);
                 tag_index.filter(Some(&expanded_tags), None)
             } else {
                 data.sections.keys().cloned().collect()
             };
 
             // Apply folder filters
-            if !params.folders.is_empty() {
+            if !folders.is_empty() {
                 candidates.retain(|section_path| {
                     if let Some(entry) = data.sections.get(section_path) {
-                        params.folders.iter().any(|f| entry.path.is_under_folder(f))
+                        folders.iter().any(|f| entry.path.is_under_folder(f))
                     } else {
                         false
                     }
@@ -384,7 +412,7 @@ impl Index for InMemoryIndex {
                 })
                 .collect();
             results.sort_by(|a, b| a.0.path.cmp(&b.0.path));
-            results.truncate(params.limit);
+            results = Self::apply_token_limit(results, limit, token_limit);
             return Ok(results);
         }
 
@@ -400,9 +428,9 @@ impl Index for InMemoryIndex {
         };
 
         // Step 3: RRF fusion
-        let fused = self.rrf.fuse(&[bm25_results, tag_results], params.limit);
+        let fused = self.rrf.fuse(&[bm25_results, tag_results], limit);
 
-        // Step 4: Map to (IndexEntry, f32)
+        // Step 4: Map to (IndexEntry, f32) and apply token limit
         let data = self.data.read().await;
         let results: Vec<(IndexEntry, f32)> = fused
             .into_iter()
@@ -412,7 +440,7 @@ impl Index for InMemoryIndex {
             })
             .collect();
 
-        Ok(results)
+        Ok(Self::apply_token_limit(results, limit, token_limit))
     }
 
     async fn list(
@@ -606,13 +634,7 @@ mod tests {
         index.update(&note2).await.unwrap();
 
         let results = index
-            .search(
-                "programming language",
-                SearchParams {
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("programming language", &[], &[], 10, None)
             .await
             .unwrap();
 
@@ -636,14 +658,7 @@ mod tests {
         index.update(&note2).await.unwrap();
 
         let results = index
-            .search(
-                "content",
-                SearchParams {
-                    tags: vec!["rust".to_string()],
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("content", &[], &["rust".to_string()], 10, None)
             .await
             .unwrap();
 
@@ -674,11 +689,10 @@ mod tests {
         let results = index
             .search(
                 "project",
-                SearchParams {
-                    folders: vec![VaultPath::new("projects/").unwrap()],
-                    limit: 10,
-                    ..Default::default()
-                },
+                &[VaultPath::new("projects/").unwrap()],
+                &[],
+                10,
+                None,
             )
             .await
             .unwrap();
@@ -776,16 +790,7 @@ mod tests {
         let note = make_note("note.md", "# Test\n\nContent.\n");
         index.update(&note).await.unwrap();
 
-        let results = index
-            .search(
-                "",
-                SearchParams {
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        let results = index.search("", &[], &[], 10, None).await.unwrap();
 
         assert!(results.is_empty());
     }
@@ -802,14 +807,7 @@ mod tests {
 
         // Filter by parent tag "project" should match "project/alpha"
         let results = index
-            .search(
-                "alpha",
-                SearchParams {
-                    tags: vec!["project".to_string()],
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("alpha", &[], &["project".to_string()], 10, None)
             .await
             .unwrap();
 

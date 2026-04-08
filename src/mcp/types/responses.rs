@@ -1,3 +1,5 @@
+//! MCP response types.
+
 use serde::Serialize;
 
 use crate::common::{RevisionToken, VaultPath};

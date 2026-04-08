@@ -46,10 +46,9 @@
 
 pub mod helpers;
 mod prompts;
-pub mod query;
 mod resources;
-pub mod responses;
 mod tools;
+pub mod types;
 
 use std::sync::Arc;
 
