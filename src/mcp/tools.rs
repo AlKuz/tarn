@@ -1,36 +1,16 @@
 use regex::RegexBuilder;
-use rmcp::{
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content},
-    tool, tool_router,
-};
+use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 
 use super::TarnMcpServer;
 use super::types::{
     CreateNoteParams, GetTagsParams, GetTagsResponse, RenderMarkdown, ReplaceInNoteParams,
-    SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse,
+    SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse, tool_error, tool_json, tool_text,
 };
 use crate::common::RevisionToken;
 use crate::core::responses::ReplaceMode;
 use crate::index::{Index, NoteResult};
 use crate::observer::Observer;
 use crate::storage::Storage;
-
-fn tool_json(
-    response: &(impl serde::Serialize + ?Sized),
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    let value = serde_json::to_value(response)
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::structured(value))
-}
-
-fn tool_text(text: String) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text)]))
-}
-
-fn tool_error(e: impl std::fmt::Display) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
-}
 
 #[tool_router(vis = "pub(crate)")]
 impl<S, I, O> TarnMcpServer<S, I, O>

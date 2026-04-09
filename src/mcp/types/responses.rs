@@ -29,16 +29,9 @@ pub struct VaultInfo {
 }
 
 #[derive(Debug, Serialize)]
-pub struct VaultTagInfo {
-    pub tag: String,
-    pub count: usize,
-    pub children: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct VaultTagsResponse {
     pub folder: Option<VaultPath>,
-    pub tags: Vec<VaultTagInfo>,
+    pub tags: Vec<TagInfo>,
 }
 
 #[derive(Debug, Serialize)]
