@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn build_error_from_in_memory_index_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let index_err = InMemoryIndexError::Io(io_err);
         let build_err: BuildError = index_err.into();
         assert!(matches!(build_err, BuildError::Index(_)));
