@@ -4,115 +4,19 @@
 //! It supports multiple backends: InMemoryStore, SqliteStore, DynamoDbStore, PostgresStore.
 
 pub mod config;
+pub mod errors;
 pub mod in_memory;
+pub mod types;
 
 pub use config::{InMemoryIndexConfig, IndexBuildError, IndexConfig, default_persistence_path};
+pub use errors::IndexError;
 pub use in_memory::InMemoryIndex;
+pub use types::{IndexEntry, IndexLink, IndexMeta, NoteResult, SectionResult};
 
 use std::future::Future;
 
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::VaultPath;
 use crate::note_handler::Note;
-
-// ---------------------------------------------------------------------------
-// Search parameters
-// ---------------------------------------------------------------------------
-
-/// Parameters for search queries.
-#[derive(Debug, Clone, Default)]
-pub struct SearchParams {
-    /// Hard filter: limit results to notes under these folders.
-    /// Empty means no folder filter.
-    pub folders: Vec<VaultPath>,
-    /// Hard filter: limit results to sections with at least one of these tags.
-    /// Empty means no tag filter.
-    pub tags: Vec<String>,
-    /// Maximum number of section results to return.
-    pub limit: usize,
-}
-
-// ---------------------------------------------------------------------------
-// Index link types
-// ---------------------------------------------------------------------------
-
-/// Simplified link representation for index storage.
-///
-/// Compared to the full `Link` enum, this drops details like heading references,
-/// block refs, embed flags, and titles - keeping only what's needed for queries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IndexLink {
-    /// Wiki link: `[[target]]` or `[[target|alias]]`
-    Wiki {
-        target: String,
-        alias: Option<String>,
-    },
-    /// Markdown link: `[text](url)`
-    Markdown { url: String, text: String },
-    /// URL autolink: `<https://example.com>`
-    Url { url: String },
-    /// Email autolink: `<user@example.com>`
-    Email { address: String },
-}
-
-// ---------------------------------------------------------------------------
-// Section entry
-// ---------------------------------------------------------------------------
-
-/// An indexed entry keyed by `VaultPath`.
-///
-/// Currently every entry corresponds to a note section, but the struct is
-/// intentionally generic so the index can store other content types in the
-/// future.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexEntry {
-    /// Full path to this indexed entry (e.g., `note.md#Goals/Q1`).
-    pub path: VaultPath,
-    /// Tags attached to this entry.
-    pub tags: Vec<String>,
-    /// Links found in this entry.
-    pub links: Vec<IndexLink>,
-    /// Token count of the entry content.
-    pub token_count: usize,
-    /// Revision token for change detection.
-    pub revision: RevisionToken,
-}
-
-// ---------------------------------------------------------------------------
-// Index metadata
-// ---------------------------------------------------------------------------
-
-/// Metadata about the index state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IndexMeta {
-    /// Total number of indexed notes.
-    pub note_count: usize,
-    /// Timestamp of last indexing operation.
-    pub last_indexed: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-// ---------------------------------------------------------------------------
-// Index error
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur during index operations.
-#[derive(Debug, Error)]
-pub enum IndexError {
-    /// The requested note was not found in the index.
-    #[error("note not found: {0}")]
-    NotFound(VaultPath),
-    /// The operation is not supported by this backend.
-    #[error("operation not supported by this backend")]
-    NotSupported,
-    /// The index data is corrupted.
-    #[error("index corrupted: {0}")]
-    Corrupted(String),
-    /// A backend-specific error occurred.
-    #[error("backend error: {0}")]
-    Backend(String),
-}
 
 // ---------------------------------------------------------------------------
 // Index trait
@@ -157,36 +61,43 @@ pub trait Index: Send + Sync {
     // Search operations
     // -------------------------------------------------------------------------
 
-    /// Search for sections matching a query string.
+    /// Search for notes matching a query string.
     ///
-    /// Returns sections with BM25 relevance scores, filtered by `SearchParams`.
+    /// Returns notes grouped by path with BM25 relevance scores, filtered by
+    /// folders and tags. The `limit` caps the number of sections before grouping.
+    /// The `token_limit` caps total tokens across all results.
+    /// The `score_threshold` filters out sections with scores below the value.
     fn search(
         &self,
         query: &str,
-        params: SearchParams,
-    ) -> impl Future<Output = Result<Vec<(IndexEntry, f32)>, IndexError>> + Send;
+        folders: &[VaultPath],
+        tags: &[String],
+        limit: usize,
+        token_limit: Option<usize>,
+        score_threshold: f32,
+    ) -> impl Future<Output = Result<Vec<NoteResult>, IndexError>> + Send;
 
-    /// List all sections, optionally filtered by folder.
+    /// List all notes, optionally filtered by folder.
     ///
-    /// If `recursive` is true, includes sections from all notes under the folder.
-    /// If false, only includes sections from notes directly in the folder.
+    /// If `recursive` is true, includes notes from all subdirectories.
+    /// If false, only includes notes directly in the folder.
     fn list(
         &self,
         folder: Option<&VaultPath>,
         recursive: bool,
-    ) -> impl Future<Output = Result<Vec<IndexEntry>, IndexError>> + Send;
+    ) -> impl Future<Output = Result<Vec<NoteResult>, IndexError>> + Send;
 
     // -------------------------------------------------------------------------
     // Graph queries
     // -------------------------------------------------------------------------
 
-    /// Find all sections that link to the given target.
+    /// Find all notes that link to the given target.
     ///
     /// The `target` is matched against wiki link targets (e.g., `[[target]]`).
     fn backlinks(
         &self,
         target: &str,
-    ) -> impl Future<Output = Result<Vec<IndexEntry>, IndexError>> + Send;
+    ) -> impl Future<Output = Result<Vec<NoteResult>, IndexError>> + Send;
 
     /// Get all links from sections of a note.
     fn forward_links(

@@ -21,7 +21,7 @@ use crate::common::{Configurable, VaultPath};
 use crate::note_handler::Note;
 
 use super::config::InMemoryIndexConfig;
-use super::{Index, IndexEntry, IndexError, IndexLink, IndexMeta, SearchParams};
+use super::{Index, IndexEntry, IndexError, IndexLink, IndexMeta, NoteResult};
 
 // ---------------------------------------------------------------------------
 // InMemoryIndex errors
@@ -43,41 +43,25 @@ impl From<InMemoryIndexError> for IndexError {
 }
 
 // ---------------------------------------------------------------------------
-// IndexData (persisted state — sections only, scorers rebuild)
+// IndexData (persistence format only)
 // ---------------------------------------------------------------------------
 
 /// Version marker for persistence format. Bump to force rebuild.
 const INDEX_DATA_VERSION: u32 = 3;
 
+/// Persistence format for the index.
+///
+/// Only used for serialization/deserialization — not as runtime state.
 #[derive(Serialize, Deserialize)]
 struct IndexData {
     #[serde(default)]
     version: u32,
+    #[serde(default)]
     meta: IndexMeta,
+    #[serde(default)]
     sections: HashMap<VaultPath, IndexEntry>,
     #[serde(default)]
     bm25_snapshot: Option<BM25Snapshot>,
-}
-
-impl IndexData {
-    fn new() -> Self {
-        Self {
-            version: INDEX_DATA_VERSION,
-            meta: IndexMeta {
-                note_count: 0,
-                last_indexed: None,
-            },
-            sections: HashMap::new(),
-            bm25_snapshot: None,
-        }
-    }
-
-    /// Check if a note has any sections in the index.
-    fn has_note(&self, note_path: &VaultPath) -> bool {
-        self.sections
-            .values()
-            .any(|e| e.path.note_path().as_ref() == Some(note_path))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,12 +76,11 @@ impl IndexData {
 /// - RRF fusion of both pipelines
 /// - Boolean tag/folder filtering (hard filters applied before scoring)
 pub struct InMemoryIndex {
-    data: RwLock<IndexData>,
+    sections: RwLock<HashMap<VaultPath, IndexEntry>>,
+    meta: RwLock<IndexMeta>,
     bm25_index: RwLock<BM25Index>,
     tag_index: RwLock<TagIndex>,
     rrf: RRF,
-    bm25_config: BM25Config,
-    tag_index_config: TagIndexConfig,
     persistence_path: Option<PathBuf>,
 }
 
@@ -113,44 +96,55 @@ impl InMemoryIndex {
         rrf: RRF,
         persistence_path: Option<PathBuf>,
     ) -> Result<Self, InMemoryIndexError> {
-        let mut data = match &persistence_path {
+        let mut loaded_data = match &persistence_path {
             Some(path) if path.exists() => {
                 let bytes = std::fs::read(path)?;
                 let loaded: IndexData = serde_json::from_slice(&bytes)?;
                 if loaded.version == INDEX_DATA_VERSION {
-                    loaded
+                    Some(loaded)
                 } else {
                     tracing::info!("index version changed, rebuilding");
-                    IndexData::new()
+                    None
                 }
             }
-            _ => IndexData::new(),
+            _ => None,
         };
 
         // Rebuild scorer indexes from persisted state
         let mut bm25 = bm25_index;
         let mut tags = tag_index;
 
-        // Restore BM25 from its own snapshot
-        if let Some(snapshot) = data.bm25_snapshot.take() {
-            bm25.restore(snapshot);
-        }
+        let (sections, meta) = if let Some(ref mut data) = loaded_data {
+            // Restore BM25 from its own snapshot
+            if let Some(snapshot) = data.bm25_snapshot.take() {
+                bm25.restore(snapshot);
+            }
 
-        // Rebuild tag index from persisted section tags
-        for (section_path, entry) in &data.sections {
-            tags.add(section_path.clone(), &entry.tags);
-        }
+            // Rebuild tag index from persisted section tags
+            for (section_path, entry) in &data.sections {
+                tags.add(section_path.clone(), &entry.tags);
+            }
 
-        let bm25_config = bm25.config();
-        let tag_index_config = tags.config();
+            (
+                std::mem::take(&mut data.sections),
+                std::mem::take(&mut data.meta),
+            )
+        } else {
+            (
+                HashMap::new(),
+                IndexMeta {
+                    note_count: 0,
+                    last_indexed: None,
+                },
+            )
+        };
 
         Ok(Self {
-            data: RwLock::new(data),
+            sections: RwLock::new(sections),
+            meta: RwLock::new(meta),
             bm25_index: RwLock::new(bm25),
             tag_index: RwLock::new(tags),
             rrf,
-            bm25_config,
-            tag_index_config,
             persistence_path,
         })
     }
@@ -167,9 +161,15 @@ impl InMemoryIndex {
         };
 
         let bytes = {
-            let mut inner = self.data.write().await;
-            inner.bm25_snapshot = Some(bm25_snapshot);
-            serde_json::to_vec(&*inner)?
+            let sections = self.sections.read().await;
+            let meta = self.meta.read().await;
+            let data = IndexData {
+                version: INDEX_DATA_VERSION,
+                meta: meta.clone(),
+                sections: sections.clone(),
+                bm25_snapshot: Some(bm25_snapshot),
+            };
+            serde_json::to_vec(&data)?
         };
 
         if let Some(parent) = path.parent() {
@@ -197,8 +197,10 @@ impl InMemoryIndex {
     /// Index a note, extracting all sections.
     async fn index_note_inner(&self, note: &Note, note_path: &VaultPath) {
         let is_new = {
-            let data = self.data.read().await;
-            !data.has_note(note_path)
+            let sections = self.sections.read().await;
+            !sections
+                .values()
+                .any(|e| e.path.note_path().as_ref() == Some(note_path))
         };
 
         let frontmatter_tags: Vec<String> = note
@@ -243,22 +245,47 @@ impl InMemoryIndex {
 
             // Store section entry
             {
-                let mut data = self.data.write().await;
-                data.sections.insert(section_path, entry);
+                let mut sections = self.sections.write().await;
+                sections.insert(section_path, entry);
             }
         }
 
         if is_new {
-            let mut data = self.data.write().await;
-            data.meta.note_count += 1;
+            let mut meta = self.meta.write().await;
+            meta.note_count += 1;
         }
+    }
+
+    /// Apply token limit to search results.
+    fn apply_token_limit(
+        mut results: Vec<(IndexEntry, f32)>,
+        limit: usize,
+        token_limit: Option<usize>,
+    ) -> Vec<(IndexEntry, f32)> {
+        results.truncate(limit);
+
+        let Some(max_tokens) = token_limit else {
+            return results;
+        };
+
+        let mut total_tokens = 0;
+        let mut cutoff_idx = results.len();
+        for (i, (entry, _)) in results.iter().enumerate() {
+            if total_tokens + entry.token_count > max_tokens {
+                cutoff_idx = i;
+                break;
+            }
+            total_tokens += entry.token_count;
+        }
+        results.truncate(cutoff_idx);
+        results
     }
 
     /// Remove all sections for a note path.
     async fn remove_note_sections_inner(&self, note_path: &VaultPath) {
         let section_paths: Vec<VaultPath> = {
-            let data = self.data.read().await;
-            data.sections
+            let sections = self.sections.read().await;
+            sections
                 .keys()
                 .filter(|path| path.note_path().as_ref() == Some(note_path))
                 .cloned()
@@ -266,16 +293,21 @@ impl InMemoryIndex {
         };
 
         if !section_paths.is_empty() {
-            let mut data = self.data.write().await;
+            let mut sections = self.sections.write().await;
             let mut bm25 = self.bm25_index.write().await;
             let mut tags = self.tag_index.write().await;
 
             for section_path in section_paths {
-                data.sections.remove(&section_path);
+                sections.remove(&section_path);
                 tags.remove(&section_path);
                 bm25.remove_document(&section_path);
             }
-            data.meta.note_count = data.meta.note_count.saturating_sub(1);
+            drop(sections);
+            drop(bm25);
+            drop(tags);
+
+            let mut meta = self.meta.write().await;
+            meta.note_count = meta.note_count.saturating_sub(1);
         }
     }
 }
@@ -285,8 +317,8 @@ impl Configurable for InMemoryIndex {
 
     fn config(&self) -> Self::Config {
         InMemoryIndexConfig {
-            bm25_index: self.bm25_config.clone(),
-            tag_index: self.tag_index_config.clone(),
+            bm25_index: self.bm25_index.blocking_read().config(),
+            tag_index: self.tag_index.blocking_read().config(),
             rrf: self.rrf.config(),
             persistence_path: self.persistence_path.clone(),
         }
@@ -295,10 +327,9 @@ impl Configurable for InMemoryIndex {
 
 impl Index for InMemoryIndex {
     async fn get(&self, path: &VaultPath) -> Result<Vec<IndexEntry>, IndexError> {
-        let data = self.data.read().await;
+        let sections_guard = self.sections.read().await;
 
-        let sections: Vec<IndexEntry> = data
-            .sections
+        let sections: Vec<IndexEntry> = sections_guard
             .iter()
             .filter(|(key, _)| key.note_path().as_ref() == Some(path))
             .map(|(_, entry)| entry.clone())
@@ -320,8 +351,8 @@ impl Index for InMemoryIndex {
         self.index_note_inner(note, note_path).await;
 
         {
-            let mut data = self.data.write().await;
-            data.meta.last_indexed = Some(chrono::Utc::now());
+            let mut meta = self.meta.write().await;
+            meta.last_indexed = Some(chrono::Utc::now());
         }
 
         self.persist().await.map_err(Into::into)
@@ -335,29 +366,33 @@ impl Index for InMemoryIndex {
     async fn search(
         &self,
         query: &str,
-        params: SearchParams,
-    ) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
-        if query.is_empty() && params.tags.is_empty() && params.folders.is_empty() {
+        folders: &[VaultPath],
+        tags: &[String],
+        limit: usize,
+        token_limit: Option<usize>,
+        score_threshold: f32,
+    ) -> Result<Vec<NoteResult>, IndexError> {
+        if query.is_empty() && tags.is_empty() && folders.is_empty() {
             return Ok(Vec::new());
         }
 
         // Step 1: Hard filters — get candidate section paths
         let candidates = {
-            let data = self.data.read().await;
+            let sections = self.sections.read().await;
             let tag_index = self.tag_index.read().await;
 
-            let mut candidates: HashSet<VaultPath> = if !params.tags.is_empty() {
-                let expanded_tags = tag_index.expand_hierarchical(&params.tags);
+            let mut candidates: HashSet<VaultPath> = if !tags.is_empty() {
+                let expanded_tags = tag_index.expand_hierarchical(tags);
                 tag_index.filter(Some(&expanded_tags), None)
             } else {
-                data.sections.keys().cloned().collect()
+                sections.keys().cloned().collect()
             };
 
             // Apply folder filters
-            if !params.folders.is_empty() {
+            if !folders.is_empty() {
                 candidates.retain(|section_path| {
-                    if let Some(entry) = data.sections.get(section_path) {
-                        params.folders.iter().any(|f| entry.path.is_under_folder(f))
+                    if let Some(entry) = sections.get(section_path) {
+                        folders.iter().any(|f| entry.path.is_under_folder(f))
                     } else {
                         false
                     }
@@ -375,17 +410,20 @@ impl Index for InMemoryIndex {
         // scoring and return all filtered candidates with a uniform score so
         // that callers receive meaningful results.
         if query.is_empty() {
-            let data = self.data.read().await;
+            let sections = self.sections.read().await;
             let mut results: Vec<(IndexEntry, f32)> = candidates
                 .into_iter()
                 .filter_map(|path| {
-                    let entry = data.sections.get(&path)?;
+                    let entry = sections.get(&path)?;
                     Some((entry.clone(), 1.0))
                 })
                 .collect();
             results.sort_by(|a, b| a.0.path.cmp(&b.0.path));
-            results.truncate(params.limit);
-            return Ok(results);
+            results = Self::apply_token_limit(results, limit, token_limit);
+            let scored: Vec<_> = results.into_iter().map(|(e, s)| (e, Some(s))).collect();
+            let mut notes = NoteResult::from_entries(&scored);
+            notes.sort_by(|a, b| a.path.cmp(&b.path));
+            return Ok(notes);
         }
 
         // Step 2: Score candidates through both pipelines
@@ -400,30 +438,44 @@ impl Index for InMemoryIndex {
         };
 
         // Step 3: RRF fusion
-        let fused = self.rrf.fuse(&[bm25_results, tag_results], params.limit);
+        let fused = self.rrf.fuse(&[bm25_results, tag_results], limit);
 
-        // Step 4: Map to (IndexEntry, f32)
-        let data = self.data.read().await;
+        // Step 4: Map to (IndexEntry, f32), apply token limit, group by note
+        let sections = self.sections.read().await;
         let results: Vec<(IndexEntry, f32)> = fused
             .into_iter()
             .filter_map(|(path, score)| {
-                let entry = data.sections.get(&path)?;
+                let entry = sections.get(&path)?;
                 Some((entry.clone(), score))
             })
             .collect();
 
-        Ok(results)
+        let limited = Self::apply_token_limit(results, limit, token_limit);
+
+        // Apply score threshold before grouping
+        let filtered: Vec<_> = limited
+            .into_iter()
+            .filter(|(_, score)| *score >= score_threshold)
+            .collect();
+
+        let scored: Vec<_> = filtered.into_iter().map(|(e, s)| (e, Some(s))).collect();
+        let mut notes = NoteResult::from_entries(&scored);
+        notes.sort_by(|a, b| {
+            b.max_score()
+                .partial_cmp(&a.max_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(notes)
     }
 
     async fn list(
         &self,
         folder: Option<&VaultPath>,
         recursive: bool,
-    ) -> Result<Vec<IndexEntry>, IndexError> {
-        let data = self.data.read().await;
+    ) -> Result<Vec<NoteResult>, IndexError> {
+        let sections = self.sections.read().await;
 
-        let sections: Vec<IndexEntry> = data
-            .sections
+        let entries: Vec<(IndexEntry, Option<f32>)> = sections
             .values()
             .filter(|entry| match folder {
                 None => true,
@@ -431,16 +483,18 @@ impl Index for InMemoryIndex {
                 Some(f) => entry.path.note_path().is_some_and(|np| np.is_in_folder(f)),
             })
             .cloned()
+            .map(|e| (e, None))
             .collect();
 
-        Ok(sections)
+        let mut notes = NoteResult::from_entries(&entries);
+        notes.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(notes)
     }
 
-    async fn backlinks(&self, target: &str) -> Result<Vec<IndexEntry>, IndexError> {
-        let data = self.data.read().await;
+    async fn backlinks(&self, target: &str) -> Result<Vec<NoteResult>, IndexError> {
+        let sections = self.sections.read().await;
 
-        let sections: Vec<IndexEntry> = data
-            .sections
+        let entries: Vec<(IndexEntry, Option<f32>)> = sections
             .values()
             .filter(|entry| {
                 entry.links.iter().any(|link| match link {
@@ -449,16 +503,18 @@ impl Index for InMemoryIndex {
                 })
             })
             .cloned()
+            .map(|e| (e, None))
             .collect();
 
-        Ok(sections)
+        let mut notes = NoteResult::from_entries(&entries);
+        notes.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(notes)
     }
 
     async fn forward_links(&self, path: &VaultPath) -> Result<Vec<IndexLink>, IndexError> {
-        let data = self.data.read().await;
+        let sections = self.sections.read().await;
 
-        let links: Vec<IndexLink> = data
-            .sections
+        let links: Vec<IndexLink> = sections
             .values()
             .filter(|entry| entry.path.note_path().as_ref() == Some(path))
             .flat_map(|entry| entry.links.iter().cloned())
@@ -468,14 +524,14 @@ impl Index for InMemoryIndex {
     }
 
     async fn meta(&self) -> Result<IndexMeta, IndexError> {
-        let data = self.data.read().await;
-        Ok(data.meta.clone())
+        let meta = self.meta.read().await;
+        Ok(meta.clone())
     }
 
     async fn set_meta(&self, meta: IndexMeta) -> Result<(), IndexError> {
         {
-            let mut data = self.data.write().await;
-            data.meta = meta;
+            let mut meta_guard = self.meta.write().await;
+            *meta_guard = meta;
         }
 
         self.persist().await.map_err(Into::into)
@@ -483,9 +539,12 @@ impl Index for InMemoryIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         {
-            let mut data = self.data.write().await;
-            data.sections.clear();
-            data.meta.note_count = 0;
+            let mut sections = self.sections.write().await;
+            sections.clear();
+        }
+        {
+            let mut meta = self.meta.write().await;
+            meta.note_count = 0;
         }
         {
             let mut bm25 = self.bm25_index.write().await;
@@ -500,8 +559,8 @@ impl Index for InMemoryIndex {
     }
 
     async fn count(&self) -> Result<usize, IndexError> {
-        let data = self.data.read().await;
-        Ok(data.sections.len())
+        let sections = self.sections.read().await;
+        Ok(sections.len())
     }
 
     async fn update_bulk(&self, notes: &[Note]) -> Result<(), IndexError> {
@@ -515,8 +574,8 @@ impl Index for InMemoryIndex {
         }
 
         {
-            let mut data = self.data.write().await;
-            data.meta.last_indexed = Some(chrono::Utc::now());
+            let mut meta = self.meta.write().await;
+            meta.last_indexed = Some(chrono::Utc::now());
         }
 
         self.persist().await.map_err(Into::into)
@@ -606,13 +665,7 @@ mod tests {
         index.update(&note2).await.unwrap();
 
         let results = index
-            .search(
-                "programming language",
-                SearchParams {
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("programming language", &[], &[], 10, None, 0.0)
             .await
             .unwrap();
 
@@ -636,14 +689,7 @@ mod tests {
         index.update(&note2).await.unwrap();
 
         let results = index
-            .search(
-                "content",
-                SearchParams {
-                    tags: vec!["rust".to_string()],
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("content", &[], &["rust".to_string()], 10, None, 0.0)
             .await
             .unwrap();
 
@@ -651,7 +697,7 @@ mod tests {
         assert!(
             results
                 .iter()
-                .all(|(e, _)| e.tags.contains(&"rust".to_string()))
+                .all(|r| r.tags().contains(&"rust".to_string()))
         );
     }
 
@@ -674,23 +720,21 @@ mod tests {
         let results = index
             .search(
                 "project",
-                SearchParams {
-                    folders: vec![VaultPath::new("projects/").unwrap()],
-                    limit: 10,
-                    ..Default::default()
-                },
+                &[VaultPath::new("projects/").unwrap()],
+                &[],
+                10,
+                None,
+                0.0,
             )
             .await
             .unwrap();
 
         assert!(!results.is_empty());
-        assert!(results.iter().all(|(e, _)| {
-            e.path
-                .note_path()
-                .unwrap()
-                .as_str()
-                .starts_with("projects/")
-        }));
+        assert!(
+            results
+                .iter()
+                .all(|r| r.path.as_str().starts_with("projects/"))
+        );
     }
 
     #[tokio::test]
@@ -753,7 +797,7 @@ mod tests {
         let backlinks = index.backlinks("note2").await.unwrap();
 
         assert_eq!(backlinks.len(), 1);
-        assert_eq!(backlinks[0].path.note_path().unwrap().as_str(), "note1.md");
+        assert_eq!(backlinks[0].path.as_str(), "note1.md");
     }
 
     #[tokio::test]
@@ -776,18 +820,130 @@ mod tests {
         let note = make_note("note.md", "# Test\n\nContent.\n");
         index.update(&note).await.unwrap();
 
+        let results = index.search("", &[], &[], 10, None, 0.0).await.unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistence_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let persistence_path = dir.path().join("index.json");
+
+        let config = InMemoryIndexConfig {
+            persistence_path: Some(persistence_path.clone()),
+            ..Default::default()
+        };
+
+        // Create index, add notes, persist via update
+        {
+            let index = config.build().unwrap();
+            let note = make_note("note.md", "# Hello\n\nRust programming content.\n");
+            index.update(&note).await.unwrap();
+            assert_eq!(index.count().await.unwrap(), 1);
+        }
+
+        // Create a new index from the same path — data should load
+        {
+            let index = config.build().unwrap();
+            assert_eq!(index.count().await.unwrap(), 1);
+
+            let path = VaultPath::new("note.md").unwrap();
+            let sections = index.get(&path).await.unwrap();
+            assert!(!sections.is_empty());
+
+            // BM25 should work after restore
+            let results = index.search("rust", &[], &[], 10, None, 0.0).await.unwrap();
+            assert!(!results.is_empty());
+        }
+    }
+
+    #[test]
+    fn apply_token_limit_truncates() {
+        let entry = |tokens: usize| IndexEntry {
+            path: VaultPath::new(format!("note{tokens}.md")).unwrap(),
+            tags: vec![],
+            links: vec![],
+            token_count: tokens,
+            revision: crate::common::RevisionToken::from("rev"),
+        };
+
+        let results = vec![(entry(100), 0.9), (entry(100), 0.8), (entry(100), 0.7)];
+
+        // Token limit of 150: first entry (100) fits, second would push total to 200 > 150 so it is excluded
+        let limited = InMemoryIndex::apply_token_limit(results, 10, Some(150));
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tag_only_search() {
+        let index = make_index();
+
+        let note1 = make_note(
+            "tagged.md",
+            "---\ntags:\n  - rust\n---\n# Tagged\n\nRust content.\n",
+        );
+        let note2 = make_note("untagged.md", "# Untagged\n\nOther content.\n");
+
+        index.update(&note1).await.unwrap();
+        index.update(&note2).await.unwrap();
+
+        // Empty query + tag filter
         let results = index
-            .search(
-                "",
-                SearchParams {
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("", &[], &["rust".to_string()], 10, None, 0.0)
             .await
             .unwrap();
 
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path.as_str(), "tagged.md");
+        // Scores should be uniform (1.0) for filter-only
+        assert!(results[0].sections.iter().all(|s| s.score.is_some()));
+    }
+
+    #[tokio::test]
+    async fn meta_and_set_meta() {
+        let index = make_index();
+
+        let meta = index.meta().await.unwrap();
+        assert_eq!(meta.note_count, 0);
+
+        let new_meta = IndexMeta {
+            note_count: 42,
+            last_indexed: Some(chrono::Utc::now()),
+        };
+        index.set_meta(new_meta.clone()).await.unwrap();
+
+        let loaded = index.meta().await.unwrap();
+        assert_eq!(loaded.note_count, 42);
+    }
+
+    #[tokio::test]
+    async fn remove_bulk() {
+        let index = make_index();
+
+        let note1 = make_note("a.md", "# A\n\nContent A.\n");
+        let note2 = make_note("b.md", "# B\n\nContent B.\n");
+        let note3 = make_note("c.md", "# C\n\nContent C.\n");
+
+        index.update(&note1).await.unwrap();
+        index.update(&note2).await.unwrap();
+        index.update(&note3).await.unwrap();
+        assert_eq!(index.count().await.unwrap(), 3);
+
+        let paths = vec![
+            VaultPath::new("a.md").unwrap(),
+            VaultPath::new("b.md").unwrap(),
+        ];
+        index.remove_bulk(&paths).await.unwrap();
+
+        assert_eq!(index.count().await.unwrap(), 1);
+    }
+
+    #[test]
+    fn config_returns_current_state() {
+        let index = make_index();
+        let config = index.config();
+        assert!(config.persistence_path.is_none());
     }
 
     #[tokio::test]
@@ -802,14 +958,7 @@ mod tests {
 
         // Filter by parent tag "project" should match "project/alpha"
         let results = index
-            .search(
-                "alpha",
-                SearchParams {
-                    tags: vec!["project".to_string()],
-                    limit: 10,
-                    ..Default::default()
-                },
-            )
+            .search("alpha", &[], &["project".to_string()], 10, None, 0.0)
             .await
             .unwrap();
 

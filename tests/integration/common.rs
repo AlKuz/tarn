@@ -88,8 +88,28 @@ pub async fn call_tool(client: &Client, name: &str, args: Value) -> Value {
             .map(|t| t.text.as_str())
             .unwrap_or("?")
     );
-    let text = &result.content[0].as_text().unwrap().text;
-    serde_json::from_str(text).unwrap()
+    result.structured_content.unwrap()
+}
+
+/// Call a tool that returns text content. Panics on tool errors.
+pub async fn call_tool_text(client: &Client, name: &str, args: Value) -> String {
+    let mut params = CallToolRequestParams::new(name.to_string());
+    if let Value::Object(map) = args {
+        params = params.with_arguments(map);
+    }
+    let result = client.call_tool(params).await.unwrap();
+    assert!(
+        !result.is_error.unwrap_or(false),
+        "tool {name} returned error: {}",
+        result.content[0]
+            .as_text()
+            .map(|t| t.text.as_str())
+            .unwrap_or("?")
+    );
+    result.content[0]
+        .as_text()
+        .map(|t| t.text.clone())
+        .unwrap_or_default()
 }
 
 /// Call a tool expecting an error. Returns the error text.

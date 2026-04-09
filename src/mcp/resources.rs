@@ -7,7 +7,7 @@ use rmcp::model::{
 
 use super::TarnMcpServer;
 use super::helpers::parse_folder;
-use super::responses::{
+use super::types::{
     FolderInfo, LinkInfo, NoteResourceResponse, SectionResourceResponse, VaultFoldersResponse,
     VaultInfo, VaultTagInfo, VaultTagsResponse,
 };

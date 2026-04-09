@@ -46,16 +46,19 @@
 
 pub mod helpers;
 mod prompts;
-pub mod query;
 mod resources;
-pub mod responses;
 mod tools;
+pub mod types;
 
 use std::sync::Arc;
 
 use rmcp::{
-    RoleServer, ServerHandler, handler::server::router::tool::ToolRouter, model::*,
-    service::RequestContext, tool_handler,
+    RoleServer, ServerHandler,
+    handler::server::router::{prompt::PromptRouter, tool::ToolRouter},
+    model::*,
+    prompt_handler,
+    service::RequestContext,
+    tool_handler,
 };
 
 use crate::core::tarn_core::TarnCore;
@@ -77,6 +80,7 @@ where
 {
     core: Arc<TarnCore<S, I, O>>,
     tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
 }
 
 impl<S, I, O> TarnMcpServer<S, I, O>
@@ -90,11 +94,17 @@ where
     /// The core should be fully initialized (index rebuilt if using indexing).
     pub fn new(core: Arc<TarnCore<S, I, O>>) -> Self {
         let tool_router = Self::tool_router();
-        Self { core, tool_router }
+        let prompt_router = Self::prompt_router();
+        Self {
+            core,
+            tool_router,
+            prompt_router,
+        }
     }
 }
 
 #[tool_handler]
+#[prompt_handler]
 impl<S, I, O> ServerHandler for TarnMcpServer<S, I, O>
 where
     S: Storage + Send + Sync + 'static,
@@ -140,21 +150,5 @@ where
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
         self.read_resource_by_uri(&request.uri).await
-    }
-
-    async fn list_prompts(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListPromptsResult, rmcp::ErrorData> {
-        Ok(self.list_prompts_static())
-    }
-
-    async fn get_prompt(
-        &self,
-        request: GetPromptRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResult, rmcp::ErrorData> {
-        self.get_prompt_by_name(&request.name, &request.arguments.unwrap_or_default())
     }
 }

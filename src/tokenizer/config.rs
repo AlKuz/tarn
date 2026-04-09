@@ -59,3 +59,52 @@ impl Buildable for TokenizerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::Buildable;
+
+    #[test]
+    fn default_variant_is_naive() {
+        assert_eq!(TokenizerConfig::default(), TokenizerConfig::Naive);
+    }
+
+    #[test]
+    fn build_naive() {
+        let tokenizer = TokenizerConfig::Naive.build().unwrap();
+        let tokens = tokenizer.tokenize("hello world");
+        assert!(!tokens.is_empty());
+    }
+
+    #[cfg(feature = "stemming")]
+    #[test]
+    fn build_stemming() {
+        let tokenizer = TokenizerConfig::Stemming.build().unwrap();
+        let tokens = tokenizer.tokenize("running quickly");
+        assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn build_ngram() {
+        let tokenizer = TokenizerConfig::Ngram { n: 3 }.build().unwrap();
+        let tokens = tokenizer.tokenize("hello");
+        assert!(!tokens.is_empty());
+    }
+
+    #[cfg(not(feature = "hf-tokenizer"))]
+    #[test]
+    fn build_hf_without_feature() {
+        let result = TokenizerConfig::HuggingFace {
+            model_id: "test".to_string(),
+        }
+        .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ngram_serde_default_n() {
+        let config: TokenizerConfig = serde_json::from_str(r#"{"type": "ngram"}"#).unwrap();
+        assert_eq!(config, TokenizerConfig::Ngram { n: 3 });
+    }
+}

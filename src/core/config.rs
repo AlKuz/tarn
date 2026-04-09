@@ -158,3 +158,85 @@ where
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_storage_config_local() {
+        let mut vars = HashMap::new();
+        vars.insert("STORAGE__TYPE".into(), "local".into());
+        vars.insert("STORAGE__PATH".into(), "/tmp/vault".into());
+
+        let config = TarnConfig::get_storage_config(&vars).unwrap();
+        match config {
+            StorageConfig::Local(c) => assert_eq!(c.path, std::path::PathBuf::from("/tmp/vault")),
+        }
+    }
+
+    #[test]
+    fn get_storage_config_missing_type() {
+        let vars = HashMap::new();
+        let err = TarnConfig::get_storage_config(&vars).unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+    }
+
+    #[test]
+    fn get_storage_config_unsupported_type() {
+        let mut vars = HashMap::new();
+        vars.insert("STORAGE__TYPE".into(), "s3".into());
+
+        let err = TarnConfig::get_storage_config(&vars).unwrap_err();
+        assert!(matches!(err, ConfigError::UnsupportedStorageType(_)));
+    }
+
+    #[test]
+    fn get_storage_config_missing_path() {
+        let mut vars = HashMap::new();
+        vars.insert("STORAGE__TYPE".into(), "local".into());
+
+        let err = TarnConfig::get_storage_config(&vars).unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+    }
+
+    #[test]
+    fn with_observer_overrides() {
+        let config = TarnConfig::local("/tmp/vault".into());
+        let new_observer = ObserverConfig::Local {
+            path: "/tmp/other".into(),
+        };
+        let config = config.with_observer(new_observer.clone());
+        match &config.observer {
+            ObserverConfig::Local { path } => {
+                assert_eq!(path, &std::path::PathBuf::from("/tmp/other"));
+            }
+        }
+    }
+
+    #[test]
+    fn with_index_overrides() {
+        let config = TarnConfig::local("/tmp/vault".into());
+        let new_index = IndexConfig::InMemory(InMemoryIndexConfig {
+            persistence_path: Some("/tmp/custom.json".into()),
+            ..Default::default()
+        });
+        let config = config.with_index(new_index);
+        match &config.index {
+            IndexConfig::InMemory(c) => {
+                assert_eq!(
+                    c.persistence_path,
+                    Some(std::path::PathBuf::from("/tmp/custom.json"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_error_from_in_memory_index_error() {
+        let io_err = std::io::Error::other("test");
+        let index_err = InMemoryIndexError::Io(io_err);
+        let build_err: BuildError = index_err.into();
+        assert!(matches!(build_err, BuildError::Index(_)));
+    }
+}
