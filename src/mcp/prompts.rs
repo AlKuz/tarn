@@ -87,7 +87,7 @@ where
             PromptMessage::new_text(
                 PromptMessageRole::User,
                 format!(
-                    "Summarize the project in \"{folder}\". Use tarn_search_notes(query=\"\", folder=\"{folder}\") \
+                    "Summarize the project in \"{folder}\". Use tarn_search_notes(query=\"folder:{folder}\") \
                     to find all notes, then read each via the tarn://note/{{path}} resource. \
                     Produce a status report: key documents, open topics, tag distribution, \
                     and an overview of the project structure."

@@ -1,10 +1,11 @@
 //! MCP request types.
 
+use std::fmt;
 use std::sync::LazyLock;
 
 use regex::Regex;
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 
 use crate::common::VaultPath;
 
@@ -45,7 +46,7 @@ static QUERY_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// ```
 /// use tarn::mcp::types::SearchQuery;
 ///
-/// let query = SearchQuery::from("event sourcing tag:architecture folder:concepts/");
+/// let query = SearchQuery::parse("event sourcing tag:architecture folder:concepts/").unwrap();
 /// assert_eq!(query.text, "event sourcing");
 /// assert_eq!(query.tags, vec!["architecture"]);
 /// assert_eq!(query.folders.len(), 1);
@@ -60,12 +61,35 @@ pub struct SearchQuery {
     pub folders: Vec<VaultPath>,
 }
 
-impl From<&str> for SearchQuery {
+/// Error returned when parsing a search query fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQueryError {
+    /// The invalid folder token.
+    pub folder: String,
+    /// The underlying validation error message.
+    pub reason: String,
+}
+
+impl fmt::Display for SearchQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid folder filter \"{}\": {}",
+            self.folder, self.reason
+        )
+    }
+}
+
+impl std::error::Error for SearchQueryError {}
+
+impl SearchQuery {
     /// Parse a raw query string into structured parts.
     ///
     /// Extracts `tag:name` and `folder:path` tokens as hard filters.
     /// The remainder is joined back as the text query for BM25.
-    fn from(raw: &str) -> Self {
+    ///
+    /// Returns an error if a `folder:` token contains an invalid path.
+    pub fn parse(raw: &str) -> Result<Self, SearchQueryError> {
         let mut text_parts = Vec::new();
         let mut tags = Vec::new();
         let mut folders = Vec::new();
@@ -85,9 +109,11 @@ impl From<&str> for SearchQuery {
                     } else {
                         format!("{folder}/")
                     };
-                    if let Ok(path) = VaultPath::new(folder_str) {
-                        folders.push(path);
-                    }
+                    let path = VaultPath::new(&folder_str).map_err(|e| SearchQueryError {
+                        folder: folder.to_string(),
+                        reason: e.to_string(),
+                    })?;
+                    folders.push(path);
                 }
             } else if let Some(m) = caps.get(5).or_else(|| caps.get(6)) {
                 // plain text (quoted or unquoted)
@@ -95,17 +121,27 @@ impl From<&str> for SearchQuery {
             }
         }
 
-        Self {
+        Ok(Self {
             text: text_parts.join(" "),
             tags,
             folders,
-        }
+        })
     }
 }
 
-impl From<String> for SearchQuery {
-    fn from(raw: String) -> Self {
-        Self::from(raw.as_str())
+impl TryFrom<&str> for SearchQuery {
+    type Error = SearchQueryError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
+impl TryFrom<String> for SearchQuery {
+    type Error = SearchQueryError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(&raw)
     }
 }
 
@@ -115,7 +151,7 @@ impl<'de> Deserialize<'de> for SearchQuery {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(SearchQuery::from(s))
+        SearchQuery::parse(&s).map_err(de::Error::custom)
     }
 }
 
@@ -138,9 +174,7 @@ impl JsonSchema for SearchQuery {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
-    #[schemars(
-        description = "Search query. Supports tag:name and folder:path inline filters. Omit to list notes."
-    )]
+    #[schemars(description = "Search query. Supports tag:name and folder:path inline filters.")]
     pub query: Option<SearchQuery>,
     #[schemars(description = "Max section results (default: 20)")]
     pub limit: Option<usize>,
@@ -202,7 +236,7 @@ mod tests {
 
     #[test]
     fn empty_query() {
-        let parsed = SearchQuery::from("");
+        let parsed = SearchQuery::parse("").unwrap();
         assert_eq!(parsed.text, "");
         assert!(parsed.tags.is_empty());
         assert!(parsed.folders.is_empty());
@@ -210,7 +244,7 @@ mod tests {
 
     #[test]
     fn text_only() {
-        let parsed = SearchQuery::from("event sourcing patterns");
+        let parsed = SearchQuery::parse("event sourcing patterns").unwrap();
         assert_eq!(parsed.text, "event sourcing patterns");
         assert!(parsed.tags.is_empty());
         assert!(parsed.folders.is_empty());
@@ -218,27 +252,27 @@ mod tests {
 
     #[test]
     fn single_tag() {
-        let parsed = SearchQuery::from("rust tag:programming");
+        let parsed = SearchQuery::parse("rust tag:programming").unwrap();
         assert_eq!(parsed.text, "rust");
         assert_eq!(parsed.tags, vec!["programming"]);
     }
 
     #[test]
     fn multiple_tags() {
-        let parsed = SearchQuery::from("tag:rust tag:web");
+        let parsed = SearchQuery::parse("tag:rust tag:web").unwrap();
         assert_eq!(parsed.text, "");
         assert_eq!(parsed.tags, vec!["rust", "web"]);
     }
 
     #[test]
     fn hierarchical_tag() {
-        let parsed = SearchQuery::from("tag:project/alpha");
+        let parsed = SearchQuery::parse("tag:project/alpha").unwrap();
         assert_eq!(parsed.tags, vec!["project/alpha"]);
     }
 
     #[test]
     fn single_folder() {
-        let parsed = SearchQuery::from("search text folder:concepts/");
+        let parsed = SearchQuery::parse("search text folder:concepts/").unwrap();
         assert_eq!(parsed.text, "search text");
         assert_eq!(parsed.folders.len(), 1);
         assert_eq!(parsed.folders[0].to_string(), "concepts/");
@@ -246,14 +280,16 @@ mod tests {
 
     #[test]
     fn folder_without_trailing_slash() {
-        let parsed = SearchQuery::from("folder:projects");
+        let parsed = SearchQuery::parse("folder:projects").unwrap();
         assert_eq!(parsed.folders.len(), 1);
         assert_eq!(parsed.folders[0].to_string(), "projects/");
     }
 
     #[test]
     fn mixed_filters_and_text() {
-        let parsed = SearchQuery::from("event sourcing tag:architecture folder:concepts/ patterns");
+        let parsed =
+            SearchQuery::parse("event sourcing tag:architecture folder:concepts/ patterns")
+                .unwrap();
         assert_eq!(parsed.text, "event sourcing patterns");
         assert_eq!(parsed.tags, vec!["architecture"]);
         assert_eq!(parsed.folders.len(), 1);
@@ -261,7 +297,7 @@ mod tests {
 
     #[test]
     fn tag_only_no_text() {
-        let parsed = SearchQuery::from("tag:rust tag:systems");
+        let parsed = SearchQuery::parse("tag:rust tag:systems").unwrap();
         assert_eq!(parsed.text, "");
         assert_eq!(parsed.tags, vec!["rust", "systems"]);
     }
@@ -269,7 +305,7 @@ mod tests {
     #[test]
     fn empty_tag_value_treated_as_text() {
         // `tag:` followed by space doesn't match tag pattern, becomes plain text
-        let parsed = SearchQuery::from("tag: hello");
+        let parsed = SearchQuery::parse("tag: hello").unwrap();
         assert_eq!(parsed.text, "tag: hello");
         assert!(parsed.tags.is_empty());
     }
@@ -277,14 +313,14 @@ mod tests {
     #[test]
     fn empty_folder_value_treated_as_text() {
         // `folder:` followed by space doesn't match folder pattern, becomes plain text
-        let parsed = SearchQuery::from("folder: hello");
+        let parsed = SearchQuery::parse("folder: hello").unwrap();
         assert_eq!(parsed.text, "folder: hello");
         assert!(parsed.folders.is_empty());
     }
 
     #[test]
     fn multiple_folders() {
-        let parsed = SearchQuery::from("folder:a/ folder:b/");
+        let parsed = SearchQuery::parse("folder:a/ folder:b/").unwrap();
         assert_eq!(parsed.folders.len(), 2);
     }
 
@@ -292,14 +328,14 @@ mod tests {
 
     #[test]
     fn quoted_tag_value() {
-        let parsed = SearchQuery::from(r#"tag:"multi word" search"#);
+        let parsed = SearchQuery::parse(r#"tag:"multi word" search"#).unwrap();
         assert_eq!(parsed.tags, vec!["multi word"]);
         assert_eq!(parsed.text, "search");
     }
 
     #[test]
     fn quoted_folder_value() {
-        let parsed = SearchQuery::from(r#"folder:"my folder/" search"#);
+        let parsed = SearchQuery::parse(r#"folder:"my folder/" search"#).unwrap();
         assert_eq!(parsed.folders.len(), 1);
         assert_eq!(parsed.folders[0].to_string(), "my folder/");
         assert_eq!(parsed.text, "search");
@@ -307,14 +343,15 @@ mod tests {
 
     #[test]
     fn unclosed_quote_treats_rest_as_token() {
-        let parsed = SearchQuery::from(r#"tag:"open ended"#);
+        let parsed = SearchQuery::parse(r#"tag:"open ended"#).unwrap();
         assert_eq!(parsed.tags, vec!["open ended"]);
     }
 
     #[test]
     fn mixed_quoted_and_unquoted() {
         let parsed =
-            SearchQuery::from(r#"event sourcing tag:"project management" folder:concepts/"#);
+            SearchQuery::parse(r#"event sourcing tag:"project management" folder:concepts/"#)
+                .unwrap();
         assert_eq!(parsed.text, "event sourcing");
         assert_eq!(parsed.tags, vec!["project management"]);
         assert_eq!(parsed.folders.len(), 1);
@@ -322,8 +359,21 @@ mod tests {
 
     #[test]
     fn quoted_text_not_a_filter() {
-        let parsed = SearchQuery::from(r#""hello world" search"#);
+        let parsed = SearchQuery::parse(r#""hello world" search"#).unwrap();
         assert_eq!(parsed.text, "hello world search");
+    }
+
+    #[test]
+    fn invalid_folder_returns_error() {
+        let err = SearchQuery::parse("folder:../escape").unwrap_err();
+        assert_eq!(err.folder, "../escape");
+    }
+
+    #[test]
+    fn invalid_folder_in_deserialization() {
+        let json = r#""search folder:../bad""#;
+        let result: Result<SearchQuery, _> = serde_json::from_str(json);
+        assert!(result.is_err());
     }
 
     #[test]

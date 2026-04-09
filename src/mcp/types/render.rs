@@ -30,13 +30,12 @@ pub struct RenderMarkdown<'a> {
 }
 
 impl<'a> RenderMarkdown<'a> {
-    /// Build a renderer from parallel slices of results and loaded notes.
+    /// Build a renderer from explicitly paired results and notes.
     ///
-    /// Both slices must have the same length (zip semantics).
-    pub fn new(results: &'a [NoteResult], notes: &'a [Note]) -> Self {
-        let notes = results
-            .iter()
-            .zip(notes.iter())
+    /// Each pair guarantees the `NoteResult` and `Note` correspond to the same path.
+    pub fn new(pairs: Vec<(&'a NoteResult, &'a Note)>) -> Self {
+        let notes = pairs
+            .into_iter()
             .map(|(result, note)| RenderNote { result, note })
             .collect();
         Self { notes }
@@ -157,7 +156,8 @@ mod tests {
         )];
         let notes = [Note::from("Root content here")];
 
-        let renderer = RenderMarkdown::new(&results, &notes);
+        let pairs: Vec<_> = results.iter().zip(notes.iter()).collect();
+        let renderer = RenderMarkdown::new(pairs);
         let output = renderer.render();
 
         assert!(output.contains("## design"));
@@ -172,7 +172,8 @@ mod tests {
         )];
         let notes = [Note::from("# Heading\n\nSome content")];
 
-        let renderer = RenderMarkdown::new(&results, &notes);
+        let pairs: Vec<_> = results.iter().zip(notes.iter()).collect();
+        let renderer = RenderMarkdown::new(pairs);
         let output = renderer.render();
 
         assert!(output.contains("<!-- note.md | tokens:"));
@@ -187,7 +188,8 @@ mod tests {
         )];
         let notes = [Note::from("# Heading\n\nSome content")];
 
-        let renderer = RenderMarkdown::new(&results, &notes);
+        let pairs: Vec<_> = results.iter().zip(notes.iter()).collect();
+        let renderer = RenderMarkdown::new(pairs);
         let output = renderer.render();
 
         assert!(output.contains("score: 0.92"));
@@ -201,7 +203,8 @@ mod tests {
         )];
         let notes = [Note::from("Content of readme")];
 
-        let renderer = RenderMarkdown::new(&results, &notes);
+        let pairs: Vec<_> = results.iter().zip(notes.iter()).collect();
+        let renderer = RenderMarkdown::new(pairs);
         let output = renderer.render();
 
         assert!(output.contains("## readme"));

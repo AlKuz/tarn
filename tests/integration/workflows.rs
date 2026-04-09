@@ -60,11 +60,11 @@ async fn project_exploration_workflow() {
     let tags = read_resource(&server.client, "tarn://vault/tags/projects").await;
     assert!(!tags["tags"].as_array().unwrap().is_empty());
 
-    // Step 3: Search project notes
+    // Step 3: Search project notes using inline folder filter
     let search = call_tool(
         &server.client,
         "tarn_search_notes",
-        json!({"query": "project", "folder": "projects", "limit": 50}),
+        json!({"query": "project folder:projects", "limit": 50}),
     )
     .await;
     let results = search.as_array().unwrap();

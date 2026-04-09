@@ -84,13 +84,14 @@ where
                     }
                 }
                 if params.rendered {
-                    let mut loaded = Vec::new();
+                    let mut pairs = Vec::new();
                     for nr in &results {
                         if let Ok((note, _)) = self.core.read(&nr.path.to_string()).await {
-                            loaded.push(note);
+                            pairs.push((nr, note));
                         }
                     }
-                    tool_text(RenderMarkdown::new(&results, &loaded).render())
+                    let pair_refs: Vec<_> = pairs.iter().map(|(nr, n)| (*nr, n)).collect();
+                    tool_text(RenderMarkdown::new(pair_refs).render())
                 } else {
                     tool_json(&results)
                 }
