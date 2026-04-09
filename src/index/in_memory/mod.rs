@@ -826,6 +826,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistence_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let persistence_path = dir.path().join("index.json");
+
+        let config = InMemoryIndexConfig {
+            persistence_path: Some(persistence_path.clone()),
+            ..Default::default()
+        };
+
+        // Create index, add notes, persist via update
+        {
+            let index = config.build().unwrap();
+            let note = make_note("note.md", "# Hello\n\nRust programming content.\n");
+            index.update(&note).await.unwrap();
+            assert_eq!(index.count().await.unwrap(), 1);
+        }
+
+        // Create a new index from the same path — data should load
+        {
+            let index = config.build().unwrap();
+            assert_eq!(index.count().await.unwrap(), 1);
+
+            let path = VaultPath::new("note.md").unwrap();
+            let sections = index.get(&path).await.unwrap();
+            assert!(!sections.is_empty());
+
+            // BM25 should work after restore
+            let results = index.search("rust", &[], &[], 10, None, 0.0).await.unwrap();
+            assert!(!results.is_empty());
+        }
+    }
+
+    #[test]
+    fn apply_token_limit_truncates() {
+        let entry = |tokens: usize| IndexEntry {
+            path: VaultPath::new(format!("note{tokens}.md")).unwrap(),
+            tags: vec![],
+            links: vec![],
+            token_count: tokens,
+            revision: crate::common::RevisionToken::from("rev"),
+        };
+
+        let results = vec![(entry(100), 0.9), (entry(100), 0.8), (entry(100), 0.7)];
+
+        // Token limit of 150 should include first 2 entries (100+100 > 150 at idx 1)
+        let limited = InMemoryIndex::apply_token_limit(results, 10, Some(150));
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tag_only_search() {
+        let index = make_index();
+
+        let note1 = make_note(
+            "tagged.md",
+            "---\ntags:\n  - rust\n---\n# Tagged\n\nRust content.\n",
+        );
+        let note2 = make_note("untagged.md", "# Untagged\n\nOther content.\n");
+
+        index.update(&note1).await.unwrap();
+        index.update(&note2).await.unwrap();
+
+        // Empty query + tag filter
+        let results = index
+            .search("", &[], &["rust".to_string()], 10, None, 0.0)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path.as_str(), "tagged.md");
+        // Scores should be uniform (1.0) for filter-only
+        assert!(results[0].sections.iter().all(|s| s.score.is_some()));
+    }
+
+    #[tokio::test]
+    async fn meta_and_set_meta() {
+        let index = make_index();
+
+        let meta = index.meta().await.unwrap();
+        assert_eq!(meta.note_count, 0);
+
+        let new_meta = IndexMeta {
+            note_count: 42,
+            last_indexed: Some(chrono::Utc::now()),
+        };
+        index.set_meta(new_meta.clone()).await.unwrap();
+
+        let loaded = index.meta().await.unwrap();
+        assert_eq!(loaded.note_count, 42);
+    }
+
+    #[tokio::test]
+    async fn remove_bulk() {
+        let index = make_index();
+
+        let note1 = make_note("a.md", "# A\n\nContent A.\n");
+        let note2 = make_note("b.md", "# B\n\nContent B.\n");
+        let note3 = make_note("c.md", "# C\n\nContent C.\n");
+
+        index.update(&note1).await.unwrap();
+        index.update(&note2).await.unwrap();
+        index.update(&note3).await.unwrap();
+        assert_eq!(index.count().await.unwrap(), 3);
+
+        let paths = vec![
+            VaultPath::new("a.md").unwrap(),
+            VaultPath::new("b.md").unwrap(),
+        ];
+        index.remove_bulk(&paths).await.unwrap();
+
+        assert_eq!(index.count().await.unwrap(), 1);
+    }
+
+    #[test]
+    fn config_returns_current_state() {
+        let index = make_index();
+        let config = index.config();
+        assert!(config.persistence_path.is_none());
+    }
+
+    #[tokio::test]
     async fn hierarchical_tag_expansion() {
         let index = make_index();
 

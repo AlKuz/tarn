@@ -124,3 +124,86 @@ impl RenderNote<'_> {
         sections
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::{RevisionToken, VaultPath};
+    use crate::index::{NoteResult, SectionResult};
+
+    fn make_note_result(path: &str, sections: Vec<SectionResult>) -> NoteResult {
+        NoteResult {
+            path: VaultPath::new(path).unwrap(),
+            revision: RevisionToken::from("rev"),
+            sections,
+        }
+    }
+
+    fn make_section(heading_path: Vec<&str>, score: Option<f32>) -> SectionResult {
+        SectionResult {
+            heading_path: heading_path.into_iter().map(String::from).collect(),
+            tags: vec![],
+            links: vec![],
+            token_count: 10,
+            score,
+        }
+    }
+
+    #[test]
+    fn render_root_section_uses_filename() {
+        let results = [make_note_result(
+            "projects/design.md",
+            vec![make_section(vec![], Some(0.5))],
+        )];
+        let notes = [Note::from("Root content here")];
+
+        let renderer = RenderMarkdown::new(&results, &notes);
+        let output = renderer.render();
+
+        assert!(output.contains("## design"));
+        assert!(output.contains("Root content here"));
+    }
+
+    #[test]
+    fn render_without_scores() {
+        let results = [make_note_result(
+            "note.md",
+            vec![make_section(vec!["Heading"], None)],
+        )];
+        let notes = [Note::from("# Heading\n\nSome content")];
+
+        let renderer = RenderMarkdown::new(&results, &notes);
+        let output = renderer.render();
+
+        assert!(output.contains("<!-- note.md | tokens:"));
+        assert!(!output.contains("score:"));
+    }
+
+    #[test]
+    fn render_with_scores() {
+        let results = [make_note_result(
+            "note.md",
+            vec![make_section(vec!["Heading"], Some(0.92))],
+        )];
+        let notes = [Note::from("# Heading\n\nSome content")];
+
+        let renderer = RenderMarkdown::new(&results, &notes);
+        let output = renderer.render();
+
+        assert!(output.contains("score: 0.92"));
+    }
+
+    #[test]
+    fn render_nested_path_filename() {
+        let results = [make_note_result(
+            "deep/nested/path/readme.md",
+            vec![make_section(vec![], Some(0.5))],
+        )];
+        let notes = [Note::from("Content of readme")];
+
+        let renderer = RenderMarkdown::new(&results, &notes);
+        let output = renderer.render();
+
+        assert!(output.contains("## readme"));
+    }
+}

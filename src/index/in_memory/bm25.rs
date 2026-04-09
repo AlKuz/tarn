@@ -437,6 +437,61 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_restore_roundtrip() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &["Intro"]);
+        let s2 = section_path("note2.md", &["Details"]);
+        index.add_document(s1.clone(), "Rust programming language");
+        index.add_document(s2.clone(), "Python web framework");
+
+        let snapshot = index.snapshot();
+
+        // Create a fresh index and restore
+        let mut restored = make_index();
+        restored.restore(snapshot);
+
+        // Verify search works on restored index
+        let all: HashSet<VaultPath> = [s1.clone(), s2.clone()].into();
+        let results = restored.score("rust", &all);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, s1);
+
+        assert!(restored.contains(&s1));
+        assert!(restored.contains(&s2));
+    }
+
+    #[test]
+    fn doc_length_returns_token_count() {
+        let mut index = make_index();
+        let s1 = section_path("note.md", &[]);
+        index.add_document(s1.clone(), "hello world foo");
+        assert!(index.doc_length(&s1).unwrap() > 0);
+    }
+
+    #[test]
+    fn doc_length_missing_returns_none() {
+        let index = make_index();
+        let s1 = section_path("missing.md", &[]);
+        assert!(index.doc_length(&s1).is_none());
+    }
+
+    #[test]
+    fn debug_format() {
+        let index = make_index();
+        let debug = format!("{:?}", index);
+        assert!(debug.contains("BM25Index"));
+        assert!(debug.contains("doc_count"));
+    }
+
+    #[test]
+    fn config_serde_defaults() {
+        let config: BM25Config = serde_json::from_str("{}").unwrap();
+        assert!((config.k1 - 1.2).abs() < f32::EPSILON);
+        assert!((config.b - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn update_document_replaces_content() {
         let mut index = make_index();
 

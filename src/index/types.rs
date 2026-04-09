@@ -183,3 +183,84 @@ pub struct IndexMeta {
     /// Timestamp of last indexing operation.
     pub last_indexed: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_section(
+        tags: Vec<&str>,
+        links: Vec<IndexLink>,
+        token_count: usize,
+        score: Option<f32>,
+    ) -> SectionResult {
+        SectionResult {
+            heading_path: vec![],
+            tags: tags.into_iter().map(String::from).collect(),
+            links,
+            token_count,
+            score,
+        }
+    }
+
+    #[test]
+    fn links_unions_all_sections() {
+        let note = NoteResult {
+            path: VaultPath::new("test.md").unwrap(),
+            revision: RevisionToken::from("rev"),
+            sections: vec![
+                make_section(
+                    vec![],
+                    vec![IndexLink::Wiki {
+                        target: "a".into(),
+                        alias: None,
+                    }],
+                    10,
+                    None,
+                ),
+                make_section(
+                    vec![],
+                    vec![IndexLink::Url {
+                        url: "https://example.com".into(),
+                    }],
+                    20,
+                    None,
+                ),
+            ],
+        };
+        assert_eq!(note.links().len(), 2);
+    }
+
+    #[test]
+    fn total_token_count_sums_sections() {
+        let note = NoteResult {
+            path: VaultPath::new("test.md").unwrap(),
+            revision: RevisionToken::from("rev"),
+            sections: vec![
+                make_section(vec![], vec![], 100, None),
+                make_section(vec![], vec![], 50, None),
+            ],
+        };
+        assert_eq!(note.total_token_count(), 150);
+    }
+
+    #[test]
+    fn links_empty_sections() {
+        let note = NoteResult {
+            path: VaultPath::new("test.md").unwrap(),
+            revision: RevisionToken::from("rev"),
+            sections: vec![],
+        };
+        assert!(note.links().is_empty());
+    }
+
+    #[test]
+    fn total_token_count_empty_sections() {
+        let note = NoteResult {
+            path: VaultPath::new("test.md").unwrap(),
+            revision: RevisionToken::from("rev"),
+            sections: vec![],
+        };
+        assert_eq!(note.total_token_count(), 0);
+    }
+}

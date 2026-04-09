@@ -518,4 +518,48 @@ mod tests {
         let (_dir, core) = setup();
         assert!(!core.vault_name().is_empty());
     }
+
+    #[tokio::test]
+    async fn test_rename() {
+        let (_dir, core) = setup();
+        let rev = core.write("old.md", "# Old", None).await.unwrap();
+
+        core.rename("old.md", "new.md", rev).await.unwrap();
+
+        assert!(core.exists("old.md").await.unwrap().is_none());
+        assert!(core.exists("new.md").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_backlinks() {
+        let (_dir, core) = setup();
+        core.write("source.md", "See [[target]] for details.", None)
+            .await
+            .unwrap();
+        core.write("target.md", "# Target", None).await.unwrap();
+        core.rebuild_index().await.unwrap();
+
+        let backlinks = core.backlinks("target").await.unwrap();
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0].to_string(), "source.md");
+    }
+
+    #[tokio::test]
+    async fn test_forward_links() {
+        let (_dir, core) = setup();
+        core.write("note.md", "Links to [[alpha]] and [[beta|B]].", None)
+            .await
+            .unwrap();
+        core.rebuild_index().await.unwrap();
+
+        let links = core.forward_links("note.md").await.unwrap();
+        assert_eq!(links.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_read_non_markdown_fails() {
+        let (_dir, core) = setup();
+        let err = core.read("image.png").await.unwrap_err();
+        assert!(matches!(err, CoreError::NotMarkdown(_)));
+    }
 }
