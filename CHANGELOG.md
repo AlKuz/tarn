@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/AlKuz/tarn/compare/v0.7.0...v0.8.0) (2026-04-09)
+
+
+### Features
+
+* content search tool ([#35](https://github.com/AlKuz/tarn/issues/35)) ([f7dfffa](https://github.com/AlKuz/tarn/commit/f7dfffa0c6d71d561ad711faf5685f1e767ca1b0))
+
 ## [0.7.0](https://github.com/AlKuz/tarn/compare/v0.6.0...v0.7.0) (2026-04-07)
 
 
