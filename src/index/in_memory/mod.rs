@@ -5,7 +5,7 @@ pub mod rrf;
 pub mod scorer;
 mod tags;
 
-pub use bm25::{BM25Config, BM25Index, BM25Snapshot};
+pub use bm25::{BM25Config, BM25Index};
 pub use rrf::{RRF, RRFConfig};
 pub use scorer::Scorer;
 pub use tags::{TagIndex, TagIndexConfig, TagIndexError};
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::common::{Configurable, VaultPath};
+use crate::common::{Configurable, Persistable, VaultPath};
 use crate::note_handler::Note;
 
 use super::config::InMemoryIndexConfig;
@@ -43,25 +43,72 @@ impl From<InMemoryIndexError> for IndexError {
 }
 
 // ---------------------------------------------------------------------------
-// IndexData (persistence format only)
+// Per-component persistence formats
 // ---------------------------------------------------------------------------
 
-/// Version marker for persistence format. Bump to force rebuild.
-const INDEX_DATA_VERSION: u32 = 3;
+const META_VERSION: u32 = 1;
+const SECTIONS_VERSION: u32 = 1;
 
-/// Persistence format for the index.
-///
-/// Only used for serialization/deserialization — not as runtime state.
 #[derive(Serialize, Deserialize)]
-struct IndexData {
-    #[serde(default)]
+struct MetaFile {
     version: u32,
-    #[serde(default)]
+    #[serde(flatten)]
     meta: IndexMeta,
-    #[serde(default)]
+}
+
+#[derive(Serialize, Deserialize)]
+struct SectionsFile {
+    version: u32,
     sections: HashMap<VaultPath, IndexEntry>,
-    #[serde(default)]
-    bm25_snapshot: Option<BM25Snapshot>,
+}
+
+fn save_meta(meta: &IndexMeta, path: &std::path::Path) -> Result<(), InMemoryIndexError> {
+    let file = MetaFile {
+        version: META_VERSION,
+        meta: meta.clone(),
+    };
+    let bytes = serde_json::to_vec(&file)?;
+    std::fs::write(path, &bytes)?;
+    Ok(())
+}
+
+fn load_meta(path: &std::path::Path) -> Result<Option<IndexMeta>, InMemoryIndexError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let file: MetaFile = serde_json::from_slice(&bytes)?;
+    if file.version != META_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(file.meta))
+}
+
+fn save_sections(
+    sections: &HashMap<VaultPath, IndexEntry>,
+    path: &std::path::Path,
+) -> Result<(), InMemoryIndexError> {
+    let file = SectionsFile {
+        version: SECTIONS_VERSION,
+        sections: sections.clone(),
+    };
+    let bytes = serde_json::to_vec(&file)?;
+    std::fs::write(path, &bytes)?;
+    Ok(())
+}
+
+fn load_sections(
+    path: &std::path::Path,
+) -> Result<Option<HashMap<VaultPath, IndexEntry>>, InMemoryIndexError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let file: SectionsFile = serde_json::from_slice(&bytes)?;
+    if file.version != SECTIONS_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(file.sections))
 }
 
 // ---------------------------------------------------------------------------
@@ -87,57 +134,34 @@ pub struct InMemoryIndex {
 impl InMemoryIndex {
     /// Create a new in-memory index.
     ///
-    /// If a persistence path is provided and contains valid section data,
-    /// sections are loaded from disk. BM25 and tag indexes are always rebuilt
-    /// from sections (they own their tokenizers and can't be deserialized).
+    /// If a persistence path (folder) is provided and contains valid component
+    /// files, each component loads its own state independently.
     pub fn new(
         bm25_index: BM25Index,
         tag_index: TagIndex,
         rrf: RRF,
         persistence_path: Option<PathBuf>,
     ) -> Result<Self, InMemoryIndexError> {
-        let mut loaded_data = match &persistence_path {
-            Some(path) if path.exists() => {
-                let bytes = std::fs::read(path)?;
-                let loaded: IndexData = serde_json::from_slice(&bytes)?;
-                if loaded.version == INDEX_DATA_VERSION {
-                    Some(loaded)
-                } else {
-                    tracing::info!("index version changed, rebuilding");
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        // Rebuild scorer indexes from persisted state
         let mut bm25 = bm25_index;
         let mut tags = tag_index;
-
-        let (sections, meta) = if let Some(ref mut data) = loaded_data {
-            // Restore BM25 from its own snapshot
-            if let Some(snapshot) = data.bm25_snapshot.take() {
-                bm25.restore(snapshot);
-            }
-
-            // Rebuild tag index from persisted section tags
-            for (section_path, entry) in &data.sections {
-                tags.add(section_path.clone(), &entry.tags);
-            }
-
-            (
-                std::mem::take(&mut data.sections),
-                std::mem::take(&mut data.meta),
-            )
-        } else {
-            (
-                HashMap::new(),
-                IndexMeta {
-                    note_count: 0,
-                    last_indexed: None,
-                },
-            )
+        let mut meta = IndexMeta {
+            note_count: 0,
+            last_indexed: None,
         };
+        let mut sections = HashMap::new();
+
+        if let Some(ref dir) = persistence_path
+            && dir.is_dir()
+        {
+            if let Some(loaded) = load_meta(&dir.join("meta.json"))? {
+                meta = loaded;
+            }
+            if let Some(loaded) = load_sections(&dir.join("sections.json"))? {
+                sections = loaded;
+            }
+            bm25.load(&dir.join("bm25.json"))?;
+            tags.load(&dir.join("tags.json"))?;
+        }
 
         Ok(Self {
             sections: RwLock::new(sections),
@@ -149,36 +173,30 @@ impl InMemoryIndex {
         })
     }
 
-    /// Save the index sections to disk (atomic write via temp file + rename).
+    /// Save each component to its own file in the persistence folder.
     async fn persist(&self) -> Result<(), InMemoryIndexError> {
-        let Some(path) = &self.persistence_path else {
+        let Some(dir) = &self.persistence_path else {
             return Ok(());
         };
 
-        let bm25_snapshot = {
-            let bm25 = self.bm25_index.read().await;
-            bm25.snapshot()
-        };
+        std::fs::create_dir_all(dir)?;
 
-        let bytes = {
-            let sections = self.sections.read().await;
+        {
             let meta = self.meta.read().await;
-            let data = IndexData {
-                version: INDEX_DATA_VERSION,
-                meta: meta.clone(),
-                sections: sections.clone(),
-                bm25_snapshot: Some(bm25_snapshot),
-            };
-            serde_json::to_vec(&data)?
-        };
-
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            save_meta(&meta, &dir.join("meta.json"))?;
         }
-
-        let temp_path = path.with_extension("tmp");
-        tokio::fs::write(&temp_path, &bytes).await?;
-        tokio::fs::rename(&temp_path, path).await?;
+        {
+            let sections = self.sections.read().await;
+            save_sections(&sections, &dir.join("sections.json"))?;
+        }
+        {
+            let bm25 = self.bm25_index.read().await;
+            bm25.save(&dir.join("bm25.json"))?;
+        }
+        {
+            let tags = self.tag_index.read().await;
+            tags.save(&dir.join("tags.json"))?;
+        }
 
         Ok(())
     }
@@ -828,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn persistence_roundtrip() {
         let dir = tempfile::TempDir::new().unwrap();
-        let persistence_path = dir.path().join("index.json");
+        let persistence_path = dir.path().join("index_dir");
 
         let config = InMemoryIndexConfig {
             persistence_path: Some(persistence_path.clone()),
@@ -838,10 +856,19 @@ mod tests {
         // Create index, add notes, persist via update
         {
             let index = config.build().unwrap();
-            let note = make_note("note.md", "# Hello\n\nRust programming content.\n");
+            let note = make_note(
+                "note.md",
+                "---\ntags:\n  - rust\n---\n# Hello\n\nRust programming content.\n",
+            );
             index.update(&note).await.unwrap();
             assert_eq!(index.count().await.unwrap(), 1);
         }
+
+        // Verify component files exist
+        assert!(persistence_path.join("meta.json").exists());
+        assert!(persistence_path.join("sections.json").exists());
+        assert!(persistence_path.join("bm25.json").exists());
+        assert!(persistence_path.join("tags.json").exists());
 
         // Create a new index from the same path — data should load
         {
@@ -855,7 +882,37 @@ mod tests {
             // BM25 should work after restore
             let results = index.search("rust", &[], &[], 10, None, 0.0).await.unwrap();
             assert!(!results.is_empty());
+
+            // Tag filtering should work after restore (no rebuild from sections)
+            let tag_results = index
+                .search("", &[], &["rust".to_string()], 10, None, 0.0)
+                .await
+                .unwrap();
+            assert!(!tag_results.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn persistence_partial_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let persistence_path = dir.path().join("index_dir");
+        std::fs::create_dir_all(&persistence_path).unwrap();
+
+        // Only write sections file — other components should start empty
+        let sections_file = SectionsFile {
+            version: SECTIONS_VERSION,
+            sections: HashMap::new(),
+        };
+        let bytes = serde_json::to_vec(&sections_file).unwrap();
+        std::fs::write(persistence_path.join("sections.json"), bytes).unwrap();
+
+        let config = InMemoryIndexConfig {
+            persistence_path: Some(persistence_path),
+            ..Default::default()
+        };
+
+        let index = config.build().unwrap();
+        assert_eq!(index.count().await.unwrap(), 0);
     }
 
     #[test]
