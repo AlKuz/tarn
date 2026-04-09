@@ -88,7 +88,7 @@ impl RenderNote<'_> {
             };
 
             let mut block = String::new();
-            let token_count = resolved.word_count();
+            let token_count = section_result.token_count;
             // Metadata comment
             if let Some(score) = section_result.score {
                 writeln!(

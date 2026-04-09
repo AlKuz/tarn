@@ -271,11 +271,11 @@ impl InMemoryIndex {
         let mut total_tokens = 0;
         let mut cutoff_idx = results.len();
         for (i, (entry, _)) in results.iter().enumerate() {
-            total_tokens += entry.token_count;
-            if total_tokens > max_tokens {
-                cutoff_idx = i + 1; // Include this entry but stop after
+            if total_tokens + entry.token_count > max_tokens {
+                cutoff_idx = i;
                 break;
             }
+            total_tokens += entry.token_count;
         }
         results.truncate(cutoff_idx);
         results
@@ -870,9 +870,9 @@ mod tests {
 
         let results = vec![(entry(100), 0.9), (entry(100), 0.8), (entry(100), 0.7)];
 
-        // Token limit of 150 should include first 2 entries (100+100 > 150 at idx 1)
+        // Token limit of 150: first entry (100) fits, second would push total to 200 > 150 so it is excluded
         let limited = InMemoryIndex::apply_token_limit(results, 10, Some(150));
-        assert_eq!(limited.len(), 2);
+        assert_eq!(limited.len(), 1);
     }
 
     #[tokio::test]
