@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::VaultPath;
 
 // ---------------------------------------------------------------------------
 // Index link types
@@ -48,8 +48,6 @@ pub struct IndexEntry {
     pub links: Vec<IndexLink>,
     /// Token count of the entry content.
     pub token_count: usize,
-    /// Revision token for change detection.
-    pub revision: RevisionToken,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,8 +85,6 @@ pub struct SectionResult {
 pub struct NoteResult {
     /// Note-level path (e.g., `projects/alpha.md`).
     pub path: VaultPath,
-    /// Revision token for change detection (shared by all sections of this note).
-    pub revision: RevisionToken,
     /// Individual section results.
     pub sections: Vec<SectionResult>,
 }
@@ -156,7 +152,6 @@ impl NoteResult {
                         note_path.clone(),
                         NoteResult {
                             path: note_path,
-                            revision: entry.revision.clone(),
                             sections: vec![section],
                         },
                     );
@@ -207,7 +202,6 @@ mod tests {
     fn links_unions_all_sections() {
         let note = NoteResult {
             path: VaultPath::new("test.md").unwrap(),
-            revision: RevisionToken::from("rev"),
             sections: vec![
                 make_section(
                     vec![],
@@ -235,7 +229,6 @@ mod tests {
     fn total_token_count_sums_sections() {
         let note = NoteResult {
             path: VaultPath::new("test.md").unwrap(),
-            revision: RevisionToken::from("rev"),
             sections: vec![
                 make_section(vec![], vec![], 100, None),
                 make_section(vec![], vec![], 50, None),
@@ -248,7 +241,6 @@ mod tests {
     fn links_empty_sections() {
         let note = NoteResult {
             path: VaultPath::new("test.md").unwrap(),
-            revision: RevisionToken::from("rev"),
             sections: vec![],
         };
         assert!(note.links().is_empty());
@@ -258,7 +250,6 @@ mod tests {
     fn total_token_count_empty_sections() {
         let note = NoteResult {
             path: VaultPath::new("test.md").unwrap(),
-            revision: RevisionToken::from("rev"),
             sections: vec![],
         };
         assert_eq!(note.total_token_count(), 0);

@@ -65,6 +65,7 @@ use self::types::{McpResult, mcp_not_found};
 use crate::core::tarn_core::TarnCore;
 use crate::index::Index;
 use crate::observer::Observer;
+use crate::revisions::RevisionTracker;
 use crate::storage::Storage;
 
 /// MCP server exposing Tarn vault operations.
@@ -73,27 +74,29 @@ use crate::storage::Storage;
 /// and prompts for AI agent integration. The server is clone-cheap (uses `Arc`
 /// internally) and can be shared across multiple transport connections.
 #[derive(Clone)]
-pub struct TarnMcpServer<S, I, O>
+pub struct TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
-    core: Arc<TarnCore<S, I, O>>,
+    core: Arc<TarnCore<S, I, O, R>>,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
 }
 
-impl<S, I, O> TarnMcpServer<S, I, O>
+impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     /// Create a new MCP server wrapping the given core.
     ///
     /// The core should be fully initialized (index rebuilt if using indexing).
-    pub fn new(core: Arc<TarnCore<S, I, O>>) -> Self {
+    pub fn new(core: Arc<TarnCore<S, I, O, R>>) -> Self {
         let tool_router = Self::tool_router();
         let prompt_router = Self::prompt_router();
         Self {
@@ -106,11 +109,12 @@ where
 
 #[tool_handler]
 #[prompt_handler]
-impl<S, I, O> ServerHandler for TarnMcpServer<S, I, O>
+impl<S, I, O, R> ServerHandler for TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(

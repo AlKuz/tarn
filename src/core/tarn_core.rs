@@ -13,6 +13,7 @@ use crate::index::find_direct_children;
 use crate::index::{Index, IndexError, IndexLink, NoteResult};
 use crate::note_handler::{Note, Section};
 use crate::observer::{Observer, ObserverError, StorageEvent};
+use crate::revisions::RevisionTracker;
 use crate::storage::{FileContent, Storage, StorageError};
 
 #[derive(Debug, Error)]
@@ -31,34 +32,44 @@ pub enum CoreError {
     InvalidRegex(#[from] regex::Error),
 }
 
-pub struct TarnCore<S, I, O> {
+pub struct TarnCore<S, I, O, R> {
     storage: Arc<S>,
     vault_name: String,
     index: Arc<I>,
     observer: Arc<O>,
+    revisions: Arc<R>,
 }
 
-impl<S, I, O> TarnCore<S, I, O> {
-    pub fn new(storage: Arc<S>, vault_name: String, index: Arc<I>, observer: Arc<O>) -> Self {
+impl<S, I, O, R> TarnCore<S, I, O, R> {
+    pub fn new(
+        storage: Arc<S>,
+        vault_name: String,
+        index: Arc<I>,
+        observer: Arc<O>,
+        revisions: Arc<R>,
+    ) -> Self {
         Self {
             storage,
             vault_name,
             index,
             observer,
+            revisions,
         }
     }
 }
 
-impl<S, I, O> Configurable for TarnCore<S, I, O>
+impl<S, I, O, R> Configurable for TarnCore<S, I, O, R>
 where
     S: Storage + Configurable + Send + Sync + 'static,
     I: Index + Configurable + Send + Sync + 'static,
     O: Observer + Configurable + Send + Sync + 'static,
+    R: RevisionTracker + Configurable + Send + Sync + 'static,
     S::Config: Serialize + DeserializeOwned,
     I::Config: Serialize + DeserializeOwned,
     O::Config: Serialize + DeserializeOwned,
+    R::Config: Serialize + DeserializeOwned,
 {
-    type Config = TarnConfig<S::Config, <I as Configurable>::Config, O::Config>;
+    type Config = TarnConfig<S::Config, <I as Configurable>::Config, O::Config, R::Config>;
 
     fn config(&self) -> Self::Config {
         TarnConfig {
@@ -66,23 +77,25 @@ where
             storage: self.storage.config(),
             index: self.index.config(),
             observer: self.observer.config(),
+            revisions: self.revisions.config(),
         }
     }
 }
 
-impl<S, I, O> TarnCore<S, I, O>
+impl<S, I, O, R> TarnCore<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
-    async fn read_and_parse(&self, path: &VaultPath) -> Result<(Note, RevisionToken), CoreError> {
+    async fn read_and_parse(&self, path: &VaultPath) -> Result<Note, CoreError> {
         let file = self.storage.read(path).await?;
         match file.content {
             FileContent::Markdown(content) => {
                 let mut note = Note::from(content.as_str());
                 note.path = Some(path.clone());
-                Ok((note, file.meta.revision_token))
+                Ok(note)
             }
             FileContent::Image(_) => Err(CoreError::NotMarkdown(path.clone())),
         }
@@ -107,7 +120,7 @@ where
 
         for file_path in &files {
             match self.read_and_parse(file_path).await {
-                Ok((note, _)) => notes.push(note),
+                Ok(note) => notes.push(note),
                 Err(e) => {
                     warn!(path = %file_path, error = %e, "skipping note during index rebuild");
                 }
@@ -118,14 +131,81 @@ where
         Ok(())
     }
 
+    /// Validate all tracked revisions against current storage state.
+    ///
+    /// Called at startup to reconcile the tracker with any changes that occurred
+    /// while the server was offline. Updates mismatched tokens, removes entries
+    /// for deleted files, and adds entries for new untracked files. Index
+    /// entries are kept in sync with the tracker for any markdown file changes.
+    pub async fn validate_revisions(&self) -> Result<(), CoreError> {
+        let stream = self.storage.list(&VaultPath::Root).await?;
+        tokio::pin!(stream);
+        let files: Vec<_> = stream.collect().await;
+
+        let tracked = self.revisions.all_revisions().await;
+        let mut storage_paths: HashSet<VaultPath> = HashSet::new();
+
+        for meta in &files {
+            storage_paths.insert(meta.path.clone());
+            let needs_sync = match self.revisions.get_revision(&meta.path).await {
+                Some(stored) if stored != meta.revision_token => {
+                    warn!(path = %meta.path, "revision mismatch, updating tracker and index");
+                    true
+                }
+                None => true,
+                _ => false,
+            };
+
+            if needs_sync {
+                self.revisions
+                    .update_revision(&meta.path, meta.revision_token.clone())
+                    .await;
+                self.reindex_path(&meta.path).await;
+            }
+        }
+
+        for (path, _) in tracked {
+            if !storage_paths.contains(&path) {
+                warn!(path = %path, "tracked path no longer exists, removing from tracker and index");
+                self.revisions.remove_revision(&path).await;
+                if path.is_note()
+                    && let Err(e) = self.index.remove(&path).await
+                {
+                    debug!(path = %path, error = %e, "failed to remove from index");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read and re-index a single note path. Skips non-note paths and logs
+    /// (but does not propagate) read/parse failures.
+    async fn reindex_path(&self, path: &VaultPath) {
+        if !path.is_note() {
+            return;
+        }
+        match self.read_and_parse(path).await {
+            Ok(note) => {
+                if let Err(e) = self.index.update(&note).await {
+                    debug!(path = %path, error = %e, "failed to update index");
+                }
+            }
+            Err(e) => {
+                debug!(path = %path, error = %e, "failed to read note for indexing");
+            }
+        }
+    }
+
     /// Start background index synchronization.
     ///
-    /// Spawns a task that watches for file changes and updates the index.
-    /// Returns a handle to the background task.
+    /// Spawns a task that watches for file changes and updates the index
+    /// and revision tracker. Returns a handle to the background task.
     pub fn start_index_sync(&self) -> JoinHandle<()> {
         let index = self.index.clone();
         let storage = self.storage.clone();
         let observer = self.observer.clone();
+        let revisions = self.revisions.clone();
 
         tokio::spawn(async move {
             let stream = match observer.observe().await {
@@ -139,7 +219,11 @@ where
 
             while let Some(event) = stream.next().await {
                 match event {
-                    StorageEvent::Created { path, .. } | StorageEvent::Updated { path, .. } => {
+                    StorageEvent::Created { path, token }
+                    | StorageEvent::Updated { path, token } => {
+                        // Update revision tracker with observed token
+                        revisions.update_revision(&path, token).await;
+
                         if !path.is_note() {
                             continue;
                         }
@@ -166,6 +250,9 @@ where
                         }
                     }
                     StorageEvent::Deleted { path } => {
+                        // Remove from revision tracker
+                        revisions.remove_revision(&path).await;
+
                         if !path.is_note() {
                             continue;
                         }
@@ -181,51 +268,83 @@ where
         })
     }
 
-    /// Read a note's parsed content and revision token.
-    pub async fn read(&self, path: &str) -> Result<(Note, RevisionToken), CoreError> {
+    /// Look up the tracked revision for a path, or fail with `NoteNotFound`.
+    async fn tracked_revision(&self, path: &VaultPath) -> Result<RevisionToken, CoreError> {
+        self.revisions
+            .get_revision(path)
+            .await
+            .ok_or_else(|| CoreError::NoteNotFound(path.clone()))
+    }
+
+    /// Read a note's parsed content.
+    pub async fn read(&self, path: &str) -> Result<Note, CoreError> {
         let vault_path = Self::validate_note_path(path)?;
         self.read_and_parse(&vault_path).await
     }
 
-    /// Write content to a note path.
-    ///
-    /// Pass `None` for revision to create a new file (no conflict check).
-    /// Pass `Some(revision)` to update with optimistic concurrency.
-    pub async fn write(
-        &self,
-        path: &str,
-        content: &str,
-        revision: Option<RevisionToken>,
-    ) -> Result<RevisionToken, CoreError> {
+    /// Create a new note. Fails if a note already exists at the path.
+    pub async fn create(&self, path: &str, content: &str) -> Result<(), CoreError> {
         let vault_path = Self::validate_note_path(path)?;
-        let rev = self
+
+        let new_rev = self
             .storage
             .write(
                 &vault_path,
                 FileContent::Markdown(content.to_string()),
-                revision,
+                None,
             )
             .await?;
-        Ok(rev)
-    }
 
-    /// Delete a note with conflict check.
-    pub async fn delete(&self, path: &str, revision: RevisionToken) -> Result<(), CoreError> {
-        let vault_path = Self::validate_note_path(path)?;
-        self.storage.delete(&vault_path, revision).await?;
+        self.revisions.update_revision(&vault_path, new_rev).await;
         Ok(())
     }
 
-    /// Rename/move a note with conflict check.
-    pub async fn rename(
-        &self,
-        from: &str,
-        to: &str,
-        revision: RevisionToken,
-    ) -> Result<(), CoreError> {
+    /// Update an existing note. Fails if the note is not tracked.
+    ///
+    /// Revision control is handled server-side via the `RevisionTracker`.
+    pub async fn update(&self, path: &str, content: &str) -> Result<(), CoreError> {
+        let vault_path = Self::validate_note_path(path)?;
+        let revision = self.tracked_revision(&vault_path).await?;
+
+        let new_rev = self
+            .storage
+            .write(
+                &vault_path,
+                FileContent::Markdown(content.to_string()),
+                Some(revision),
+            )
+            .await?;
+
+        self.revisions.update_revision(&vault_path, new_rev).await;
+        Ok(())
+    }
+
+    /// Delete a note. Fails if the note is not tracked.
+    pub async fn delete(&self, path: &str) -> Result<(), CoreError> {
+        let vault_path = Self::validate_note_path(path)?;
+        let revision = self.tracked_revision(&vault_path).await?;
+
+        self.storage.delete(&vault_path, revision).await?;
+        self.revisions.remove_revision(&vault_path).await;
+        Ok(())
+    }
+
+    /// Rename/move a note. Fails if the source is not tracked.
+    pub async fn rename(&self, from: &str, to: &str) -> Result<(), CoreError> {
         let from_path = Self::validate_note_path(from)?;
         let to_path = Self::validate_note_path(to)?;
+        let revision = self.tracked_revision(&from_path).await?;
+
         self.storage.r#move(&from_path, &to_path, revision).await?;
+
+        // Update tracker: remove old path, read new path's token
+        self.revisions.remove_revision(&from_path).await;
+        if let Ok(file) = self.storage.read(&to_path).await {
+            self.revisions
+                .update_revision(&to_path, file.meta.revision_token)
+                .await;
+        }
+
         Ok(())
     }
 
@@ -243,15 +362,10 @@ where
         Ok(paths)
     }
 
-    /// Check if a note exists. Returns its revision token if found.
-    pub async fn exists(&self, path: &str) -> Result<Option<RevisionToken>, CoreError> {
+    /// Check if a note is tracked.
+    pub async fn exists(&self, path: &str) -> Result<bool, CoreError> {
         let vault_path = Self::validate_note_path(path)?;
-        if self.storage.exists(&vault_path).await? {
-            let file = self.storage.read(&vault_path).await?;
-            Ok(Some(file.meta.revision_token))
-        } else {
-            Ok(None)
-        }
+        Ok(self.revisions.get_revision(&vault_path).await.is_some())
     }
 
     /// Search for notes matching a query. Returns note-level results with scores.
@@ -329,7 +443,7 @@ where
 }
 
 // Static methods that don't depend on generic parameters
-impl<S, I, O> TarnCore<S, I, O> {
+impl<S, I, O, R> TarnCore<S, I, O, R> {
     // --- Note parsing (stateless) ---
 
     /// Parse markdown content into a Note. Stateless.
@@ -371,6 +485,7 @@ mod tests {
         crate::storage::local::LocalStorage,
         crate::index::InMemoryIndex,
         crate::observer::LocalStorageObserver,
+        crate::revisions::InMemoryRevisionTracker,
     >;
 
     fn setup() -> (TempDir, TestCore) {
@@ -380,68 +495,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_and_read() {
+    async fn test_create_and_read() {
         let (_dir, core) = setup();
-        let rev = core
-            .write("hello.md", "# Hello\nWorld", None)
-            .await
-            .unwrap();
-        assert!(!rev.to_string().is_empty());
+        core.create("hello.md", "# Hello\nWorld").await.unwrap();
 
-        let (note, read_rev) = core.read("hello.md").await.unwrap();
+        let note = core.read("hello.md").await.unwrap();
         assert_eq!(note.to_string().trim(), "# Hello\nWorld");
-        assert_eq!(read_rev, rev);
     }
 
     #[tokio::test]
-    async fn test_exists_returns_revision() {
+    async fn test_exists_reflects_tracker() {
         let (_dir, core) = setup();
-        assert!(core.exists("missing.md").await.unwrap().is_none());
+        assert!(!core.exists("missing.md").await.unwrap());
 
-        let rev = core.write("note.md", "content", None).await.unwrap();
-        let exists_rev = core.exists("note.md").await.unwrap();
-        assert_eq!(exists_rev, Some(rev));
+        core.create("note.md", "content").await.unwrap();
+        assert!(core.exists("note.md").await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_write_not_markdown() {
+    async fn test_create_not_markdown() {
         let (_dir, core) = setup();
-        let err = core.write("image.png", "data", None).await.unwrap_err();
+        let err = core.create("image.png", "data").await.unwrap_err();
         assert!(matches!(err, CoreError::NotMarkdown(_)));
     }
 
     #[tokio::test]
-    async fn test_write_update_with_revision() {
+    async fn test_update_existing_note() {
         let (_dir, core) = setup();
-        let rev1 = core.write("note.md", "original", None).await.unwrap();
-        let rev2 = core.write("note.md", "updated", Some(rev1)).await.unwrap();
-        assert_ne!(rev2, RevisionToken::from(""));
+        core.create("note.md", "original").await.unwrap();
+        core.update("note.md", "updated").await.unwrap();
 
-        let (note, _) = core.read("note.md").await.unwrap();
+        let note = core.read("note.md").await.unwrap();
         assert_eq!(note.to_string().trim(), "updated");
     }
 
     #[tokio::test]
-    async fn test_write_conflict() {
+    async fn test_update_untracked_fails() {
         let (_dir, core) = setup();
-        let rev1 = core.write("note.md", "original", None).await.unwrap();
-        core.write("note.md", "v2", Some(rev1.clone()))
-            .await
-            .unwrap();
-        // Stale revision
-        let err = core.write("note.md", "v3", Some(rev1)).await.unwrap_err();
+        let err = core.update("note.md", "content").await.unwrap_err();
+        assert!(matches!(err, CoreError::NoteNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_existing_fails() {
+        let (_dir, core) = setup();
+        core.create("note.md", "v1").await.unwrap();
+        let err = core.create("note.md", "v2").await.unwrap_err();
         assert!(matches!(
             err,
-            CoreError::Storage(StorageError::Conflict(_, _, _))
+            CoreError::Storage(StorageError::FileAlreadyExists(_))
         ));
     }
 
     #[tokio::test]
     async fn test_delete() {
         let (_dir, core) = setup();
-        let rev = core.write("note.md", "content", None).await.unwrap();
-        core.delete("note.md", rev).await.unwrap();
-        assert!(core.exists("note.md").await.unwrap().is_none());
+        core.create("note.md", "content").await.unwrap();
+        core.delete("note.md").await.unwrap();
+        assert!(!core.exists("note.md").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_delete_untracked_fails() {
+        let (_dir, core) = setup();
+        let err = core.delete("note.md").await.unwrap_err();
+        assert!(matches!(err, CoreError::NoteNotFound(_)));
     }
 
     #[tokio::test]
@@ -461,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_empty_query_returns_empty() {
         let (_dir, core) = setup();
-        core.write("note.md", "content", None).await.unwrap();
+        core.create("note.md", "content").await.unwrap();
         core.rebuild_index().await.unwrap();
 
         let hits = core.search("", &[], &[], 10, None, 0.0).await.unwrap();
@@ -471,7 +589,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_finds_content() {
         let (_dir, core) = setup();
-        core.write("note.md", "# Rust\n\nRust is a systems language", None)
+        core.create("note.md", "# Rust\n\nRust is a systems language")
             .await
             .unwrap();
         core.rebuild_index().await.unwrap();
@@ -487,10 +605,9 @@ mod tests {
     #[tokio::test]
     async fn test_tags() {
         let (_dir, core) = setup();
-        core.write(
+        core.create(
             "note.md",
             "---\ntags:\n  - rust\n  - programming\n---\n# Note",
-            None,
         )
         .await
         .unwrap();
@@ -505,8 +622,8 @@ mod tests {
     #[tokio::test]
     async fn test_list() {
         let (_dir, core) = setup();
-        core.write("a.md", "# A", None).await.unwrap();
-        core.write("b.md", "# B", None).await.unwrap();
+        core.create("a.md", "# A").await.unwrap();
+        core.create("b.md", "# B").await.unwrap();
         core.rebuild_index().await.unwrap();
 
         let paths = core.list(None, true).await.unwrap();
@@ -522,21 +639,28 @@ mod tests {
     #[tokio::test]
     async fn test_rename() {
         let (_dir, core) = setup();
-        let rev = core.write("old.md", "# Old", None).await.unwrap();
+        core.create("old.md", "# Old").await.unwrap();
 
-        core.rename("old.md", "new.md", rev).await.unwrap();
+        core.rename("old.md", "new.md").await.unwrap();
 
-        assert!(core.exists("old.md").await.unwrap().is_none());
-        assert!(core.exists("new.md").await.unwrap().is_some());
+        assert!(!core.exists("old.md").await.unwrap());
+        assert!(core.exists("new.md").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_rename_untracked_fails() {
+        let (_dir, core) = setup();
+        let err = core.rename("old.md", "new.md").await.unwrap_err();
+        assert!(matches!(err, CoreError::NoteNotFound(_)));
     }
 
     #[tokio::test]
     async fn test_backlinks() {
         let (_dir, core) = setup();
-        core.write("source.md", "See [[target]] for details.", None)
+        core.create("source.md", "See [[target]] for details.")
             .await
             .unwrap();
-        core.write("target.md", "# Target", None).await.unwrap();
+        core.create("target.md", "# Target").await.unwrap();
         core.rebuild_index().await.unwrap();
 
         let backlinks = core.backlinks("target").await.unwrap();
@@ -547,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn test_forward_links() {
         let (_dir, core) = setup();
-        core.write("note.md", "Links to [[alpha]] and [[beta|B]].", None)
+        core.create("note.md", "Links to [[alpha]] and [[beta|B]].")
             .await
             .unwrap();
         core.rebuild_index().await.unwrap();
@@ -561,5 +685,98 @@ mod tests {
         let (_dir, core) = setup();
         let err = core.read("image.png").await.unwrap_err();
         assert!(matches!(err, CoreError::NotMarkdown(_)));
+    }
+
+    // --- Revision tracking tests ---
+
+    #[tokio::test]
+    async fn test_create_updates_revision_tracker() {
+        let (_dir, core) = setup();
+        core.create("note.md", "content").await.unwrap();
+
+        let path: VaultPath = "note.md".try_into().unwrap();
+        assert!(core.revisions.get_revision(&path).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_update_updates_revision_tracker() {
+        let (_dir, core) = setup();
+        core.create("note.md", "v1").await.unwrap();
+        let path: VaultPath = "note.md".try_into().unwrap();
+        let rev1 = core.revisions.get_revision(&path).await.unwrap();
+
+        core.update("note.md", "v2").await.unwrap();
+        let rev2 = core.revisions.get_revision(&path).await.unwrap();
+        assert_ne!(rev1, rev2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_removes_from_revision_tracker() {
+        let (_dir, core) = setup();
+        core.create("note.md", "content").await.unwrap();
+        core.delete("note.md").await.unwrap();
+
+        let path: VaultPath = "note.md".try_into().unwrap();
+        assert!(core.revisions.get_revision(&path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rename_updates_revision_tracker() {
+        let (_dir, core) = setup();
+        core.create("old.md", "# Old").await.unwrap();
+        core.rename("old.md", "new.md").await.unwrap();
+
+        let old_path: VaultPath = "old.md".try_into().unwrap();
+        let new_path: VaultPath = "new.md".try_into().unwrap();
+        assert!(core.revisions.get_revision(&old_path).await.is_none());
+        assert!(core.revisions.get_revision(&new_path).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_validate_revisions_updates_mismatches() {
+        let (_dir, core) = setup();
+        core.create("note.md", "v1").await.unwrap();
+        let vault_path: VaultPath = "note.md".try_into().unwrap();
+        let rev = core.revisions.get_revision(&vault_path).await.unwrap();
+
+        // Modify file directly via storage to create mismatch
+        let _new_rev = core
+            .storage
+            .write(
+                &vault_path,
+                FileContent::Markdown("v2".to_string()),
+                Some(rev.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Tracker still has old revision
+        assert_eq!(
+            core.revisions.get_revision(&vault_path).await,
+            Some(rev.clone())
+        );
+
+        // Validate should fix the mismatch
+        core.validate_revisions().await.unwrap();
+        let tracked = core.revisions.get_revision(&vault_path).await.unwrap();
+        assert_ne!(tracked, rev);
+    }
+
+    #[tokio::test]
+    async fn test_validate_revisions_removes_deleted() {
+        let (_dir, core) = setup();
+        core.create("note.md", "content").await.unwrap();
+        let vault_path: VaultPath = "note.md".try_into().unwrap();
+        let rev = core.revisions.get_revision(&vault_path).await.unwrap();
+
+        // Delete directly via storage
+        core.storage.delete(&vault_path, rev).await.unwrap();
+
+        // Tracker still has the entry
+        assert!(core.revisions.get_revision(&vault_path).await.is_some());
+
+        // Validate should remove it
+        core.validate_revisions().await.unwrap();
+        assert!(core.revisions.get_revision(&vault_path).await.is_none());
     }
 }

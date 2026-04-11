@@ -13,13 +13,15 @@ use crate::common::VaultPath;
 use crate::index::Index;
 use crate::index::find_direct_children;
 use crate::observer::Observer;
+use crate::revisions::RevisionTracker;
 use crate::storage::Storage;
 
-impl<S, I, O> TarnMcpServer<S, I, O>
+impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     pub(crate) async fn read_vault_info(
         &self,
@@ -114,10 +116,10 @@ where
         note_path: &str,
         section_path: &str,
     ) -> McpResult<ReadResourceResult> {
-        let (note, revision) = self.core.read(note_path).await.map_err(mcp_err)?;
+        let note = self.core.read(note_path).await.map_err(mcp_err)?;
 
         let heading_path: Vec<&str> = section_path.split('/').collect();
-        let section = TarnCore::<S, I, O>::resolve_section(&note, &heading_path);
+        let section = TarnCore::<S, I, O, R>::resolve_section(&note, &heading_path);
 
         match section {
             Some(section) => {
@@ -137,7 +139,6 @@ where
                     path: format!("{}#{}", note_path, section_path),
                     note_path: note_path.to_string(),
                     heading_path: section.heading_path.clone(),
-                    revision,
                     content: section.content.clone(),
                     tags,
                     links,
@@ -168,14 +169,13 @@ where
         uri: &str,
         path: &str,
     ) -> McpResult<ReadResourceResult> {
-        let (note, revision) = self.core.read(path).await.map_err(mcp_err)?;
+        let note = self.core.read(path).await.map_err(mcp_err)?;
 
         let tags: Vec<String> = note.tags().into_iter().map(String::from).collect();
 
         let response = NoteResourceResponse {
             path: path.to_string(),
             title: note.title.clone(),
-            revision,
             frontmatter: note.frontmatter.clone(),
             content: note.to_string(),
             token_count: note.word_count(),

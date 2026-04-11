@@ -128,6 +128,10 @@ async fn main() -> anyhow::Result<()> {
     core.rebuild_index().await?;
     tracing::info!("index rebuilt");
 
+    tracing::info!("validating revisions...");
+    core.validate_revisions().await?;
+    tracing::info!("revisions validated");
+
     let index_sync_handle = core.start_index_sync();
     tracing::info!("index sync started");
 

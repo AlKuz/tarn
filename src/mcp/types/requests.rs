@@ -212,8 +212,6 @@ pub struct UpdateNoteParams {
     pub path: String,
     #[schemars(description = "New markdown content for the note")]
     pub content: String,
-    #[schemars(description = "Revision token from a prior read for conflict detection")]
-    pub revision: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -226,8 +224,6 @@ pub struct ReplaceInNoteParams {
     pub new: String,
     #[schemars(description = "Replacement mode: \"first\" (default), \"all\", or \"regex\"")]
     pub mode: Option<String>,
-    #[schemars(description = "Revision token from a prior read for conflict detection")]
-    pub revision: String,
 }
 
 #[cfg(test)]

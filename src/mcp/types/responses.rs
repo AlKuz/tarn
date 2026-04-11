@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::common::{RevisionToken, VaultPath};
+use crate::common::VaultPath;
 use crate::note_handler::{Frontmatter, Link};
 
 #[derive(Debug, Serialize)]
@@ -49,14 +49,12 @@ pub struct VaultFoldersResponse {
 #[derive(Debug, Serialize)]
 pub struct WriteNoteResponse {
     pub path: String,
-    pub revision: RevisionToken,
 }
 
 #[derive(Debug, Serialize)]
 pub struct NoteResourceResponse {
     pub path: String,
     pub title: Option<String>,
-    pub revision: RevisionToken,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<Frontmatter>,
     pub content: String,
@@ -69,7 +67,6 @@ pub struct SectionResourceResponse {
     pub path: String,
     pub note_path: String,
     pub heading_path: Vec<String>,
-    pub revision: RevisionToken,
     pub content: String,
     pub tags: Vec<String>,
     pub links: Vec<LinkInfo>,

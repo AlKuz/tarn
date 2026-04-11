@@ -289,7 +289,6 @@ async fn create_note_success() {
     .await;
 
     assert_eq!(result["path"], "test/new-note.md");
-    assert!(!result["revision"].as_str().unwrap().is_empty());
 
     // Read it back via resource
     let note = read_resource(&server.client, "tarn://note/test/new-note.md").await;
@@ -316,41 +315,40 @@ async fn create_note_existing_fails() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn update_note_with_valid_revision() {
+async fn update_note_succeeds() {
     let server = spawn_server(false).await;
 
-    // Read to get revision via resource
-    let note = read_resource(&server.client, "tarn://note/wiki/Rust.md").await;
-    let revision = note["revision"].as_str().unwrap();
-
-    // Update
     let result = call_tool(
         &server.client,
         "tarn_update_note",
         json!({
             "path": "wiki/Rust.md",
-            "content": "# Rust\n\nUpdated content.",
-            "revision": revision
+            "content": "# Rust\n\nUpdated content."
         }),
     )
     .await;
 
     assert_eq!(result["path"], "wiki/Rust.md");
-    // Revision should change
-    assert_ne!(result["revision"].as_str().unwrap(), revision);
+
+    let updated = read_resource(&server.client, "tarn://note/wiki/Rust.md").await;
+    assert!(
+        updated["content"]
+            .as_str()
+            .unwrap()
+            .contains("Updated content.")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn update_note_wrong_revision_fails() {
+async fn update_untracked_note_fails() {
     let server = spawn_server(false).await;
 
     let error = call_tool_expect_error(
         &server.client,
         "tarn_update_note",
         json!({
-            "path": "wiki/Rust.md",
-            "content": "# Bad Update",
-            "revision": "wrong-revision-token"
+            "path": "wiki/Nonexistent.md",
+            "content": "# Bad Update"
         }),
     )
     .await;
@@ -366,9 +364,6 @@ async fn update_note_wrong_revision_fails() {
 async fn replace_in_note_first_mode() {
     let server = spawn_server(false).await;
 
-    let note = read_resource(&server.client, "tarn://note/wiki/Rust.md").await;
-    let revision = note["revision"].as_str().unwrap();
-
     let result = call_tool(
         &server.client,
         "tarn_replace_in_note",
@@ -376,8 +371,7 @@ async fn replace_in_note_first_mode() {
             "path": "wiki/Rust.md",
             "old": "Rust",
             "new": "Rust (edited)",
-            "mode": "first",
-            "revision": revision
+            "mode": "first"
         }),
     )
     .await;
@@ -402,9 +396,6 @@ async fn replace_in_note_all_mode() {
     )
     .await;
 
-    let note = read_resource(&server.client, "tarn://note/test/replace-all.md").await;
-    let revision = note["revision"].as_str().unwrap();
-
     call_tool(
         &server.client,
         "tarn_replace_in_note",
@@ -412,8 +403,7 @@ async fn replace_in_note_all_mode() {
             "path": "test/replace-all.md",
             "old": "foo",
             "new": "qux",
-            "mode": "all",
-            "revision": revision
+            "mode": "all"
         }),
     )
     .await;
@@ -435,9 +425,6 @@ async fn replace_in_note_regex_mode() {
     )
     .await;
 
-    let note = read_resource(&server.client, "tarn://note/test/replace-regex.md").await;
-    let revision = note["revision"].as_str().unwrap();
-
     call_tool(
         &server.client,
         "tarn_replace_in_note",
@@ -445,8 +432,7 @@ async fn replace_in_note_regex_mode() {
             "path": "test/replace-regex.md",
             "old": r"(\d{4})-(\d{2})-(\d{2})",
             "new": "$1/$2/$3",
-            "mode": "regex",
-            "revision": revision
+            "mode": "regex"
         }),
     )
     .await;

@@ -258,7 +258,6 @@ impl InMemoryIndex {
                 tags: all_tags,
                 links,
                 token_count,
-                revision: crate::common::RevisionToken::from(chrono::Utc::now().to_rfc3339()),
             };
 
             // Store section entry
@@ -922,7 +921,6 @@ mod tests {
             tags: vec![],
             links: vec![],
             token_count: tokens,
-            revision: crate::common::RevisionToken::from("rev"),
         };
 
         let results = vec![(entry(100), 0.9), (entry(100), 0.8), (entry(100), 0.7)];

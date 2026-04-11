@@ -6,18 +6,19 @@ use super::types::{
     CreateNoteParams, GetTagsParams, GetTagsResponse, RenderMarkdown, ReplaceInNoteParams,
     SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse, tool_error, tool_json, tool_text,
 };
-use crate::common::RevisionToken;
 use crate::core::responses::ReplaceMode;
 use crate::index::{Index, NoteResult};
 use crate::observer::Observer;
+use crate::revisions::RevisionTracker;
 use crate::storage::Storage;
 
 #[tool_router(vis = "pub(crate)")]
-impl<S, I, O> TarnMcpServer<S, I, O>
+impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     #[tool(
         description = "Search across the vault. Returns notes ranked by relevance with section scores. Supports text search, tag filters (tag:name), and folder filters (folder:path). Set rendered=true to get markdown content instead of JSON."
@@ -66,7 +67,7 @@ where
                 if params.rendered {
                     let mut pairs = Vec::new();
                     for nr in &results {
-                        if let Ok((note, _)) = self.core.read(&nr.path.to_string()).await {
+                        if let Ok(note) = self.core.read(&nr.path.to_string()).await {
                             pairs.push((nr, note));
                         }
                     }
@@ -116,38 +117,21 @@ where
         &self,
         Parameters(params): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        match self.core.write(&params.path, &params.content, None).await {
-            Ok(revision) => {
-                let response = WriteNoteResponse {
-                    path: params.path,
-                    revision,
-                };
-                tool_json(&response)
-            }
+        match self.core.create(&params.path, &params.content).await {
+            Ok(()) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
 
     #[tool(
-        description = "Update an existing note. Requires revision token from a prior read for conflict detection."
+        description = "Update an existing note. Revision control is handled server-side by the revision tracker."
     )]
     async fn tarn_update_note(
         &self,
         Parameters(params): Parameters<UpdateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let revision: RevisionToken = params.revision.into();
-        match self
-            .core
-            .write(&params.path, &params.content, Some(revision))
-            .await
-        {
-            Ok(new_revision) => {
-                let response = WriteNoteResponse {
-                    path: params.path,
-                    revision: new_revision,
-                };
-                tool_json(&response)
-            }
+        match self.core.update(&params.path, &params.content).await {
+            Ok(()) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
@@ -170,10 +154,8 @@ where
             }
         };
 
-        let revision: RevisionToken = params.revision.into();
-
         // Read current content
-        let (note, _) = match self.core.read(&params.path).await {
+        let note = match self.core.read(&params.path).await {
             Ok(result) => result,
             Err(e) => return tool_error(e),
         };
@@ -191,19 +173,8 @@ where
             }
         };
 
-        // Write back with user's revision for conflict detection
-        match self
-            .core
-            .write(&params.path, &new_content, Some(revision))
-            .await
-        {
-            Ok(new_revision) => {
-                let response = WriteNoteResponse {
-                    path: params.path,
-                    revision: new_revision,
-                };
-                tool_json(&response)
-            }
+        match self.core.update(&params.path, &new_content).await {
+            Ok(()) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
