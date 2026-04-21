@@ -47,6 +47,7 @@
 pub mod helpers;
 mod prompts;
 mod resources;
+pub mod sync;
 mod tools;
 pub mod types;
 

@@ -232,15 +232,10 @@ async fn get_tags_with_prefix() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_tags_with_notes() {
+async fn get_tags_with_prefix_count() {
     let server = spawn_server(false).await;
 
-    let result = call_tool(
-        &server.client,
-        "tarn_get_tags",
-        json!({"prefix": "daily", "include_notes": true}),
-    )
-    .await;
+    let result = call_tool(&server.client, "tarn_get_tags", json!({"prefix": "daily"})).await;
 
     let daily_tag = result["tags"]
         .as_array()
@@ -249,12 +244,6 @@ async fn get_tags_with_notes() {
         .find(|t| t["tag"] == "daily")
         .unwrap();
     assert_eq!(daily_tag["count"].as_u64().unwrap(), 3);
-    let notes = daily_tag["notes"].as_array().unwrap();
-    assert!(
-        notes
-            .iter()
-            .any(|p| p.as_str().unwrap().contains("2024-01-15"))
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -297,17 +286,17 @@ async fn create_note_success() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_note_existing_fails() {
+async fn create_note_overwrites_existing() {
     let server = spawn_server(false).await;
 
-    let error = call_tool_expect_error(
+    let result = call_tool(
         &server.client,
         "tarn_create_note",
-        json!({"path": "wiki/Rust.md", "content": "# Duplicate"}),
+        json!({"path": "wiki/Rust.md", "content": "# Overwritten"}),
     )
     .await;
 
-    assert!(!error.is_empty());
+    assert_eq!(result["path"], "wiki/Rust.md");
 }
 
 // =============================================================================
@@ -340,20 +329,20 @@ async fn update_note_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn update_untracked_note_fails() {
+async fn update_untracked_note_creates() {
     let server = spawn_server(false).await;
 
-    let error = call_tool_expect_error(
+    let result = call_tool(
         &server.client,
         "tarn_update_note",
         json!({
-            "path": "wiki/Nonexistent.md",
-            "content": "# Bad Update"
+            "path": "wiki/NewNote.md",
+            "content": "# New Note"
         }),
     )
     .await;
 
-    assert!(!error.is_empty());
+    assert_eq!(result["path"], "wiki/NewNote.md");
 }
 
 // =============================================================================

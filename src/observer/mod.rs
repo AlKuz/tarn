@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use crate::common::{RevisionToken, VaultPath};
 use futures_core::stream::Stream;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StorageEvent {
     Created {
         path: VaultPath,

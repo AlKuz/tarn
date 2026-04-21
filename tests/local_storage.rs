@@ -983,6 +983,30 @@ mod crlf_support {
     use tarn::TarnConfig;
     use tarn::common::Buildable;
     use tarn::note_handler::Note;
+    use tarn::observer::StorageEvent;
+
+    async fn index_all<S, I, O, R>(core: &tarn::TarnCore<S, I, O, R>)
+    where
+        S: tarn::storage::Storage + Send + Sync + 'static,
+        I: tarn::index::Index + Send + Sync + 'static,
+        O: tarn::observer::Observer + Send + Sync + 'static,
+        R: tarn::revisions::RevisionTracker + Send + Sync + 'static,
+    {
+        let stream = core.review_changes().await.unwrap();
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StorageEvent::Created { path, .. } | StorageEvent::Updated { path, .. } => {
+                    if let Ok(file) = core.read(&path).await {
+                        let _ = core.update_index(&file).await;
+                    }
+                }
+                StorageEvent::Deleted { path } => {
+                    let _ = core.delete_index(&path).await;
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn reads_file_with_crlf_line_endings() {
@@ -1030,14 +1054,13 @@ mod crlf_support {
         .unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
-        core.rebuild_index().await.unwrap();
+        index_all(&core).await;
 
         // Test tags returns correctly parsed tags
-        let tag_entries = core.tags(None, None).await.unwrap();
-        let tag_names: Vec<&str> = tag_entries.iter().map(|t| t.tag.as_str()).collect();
+        let tag_counts = core.list_tags(None, None).await.unwrap();
 
-        assert!(tag_names.contains(&"programming/rust"));
-        assert!(tag_names.contains(&"programming/python"));
+        assert!(tag_counts.contains_key("programming/rust"));
+        assert!(tag_counts.contains_key("programming/python"));
     }
 
     #[tokio::test]
@@ -1052,7 +1075,7 @@ mod crlf_support {
         .unwrap();
 
         let core = TarnConfig::local(dir.path().to_path_buf()).build().unwrap();
-        core.rebuild_index().await.unwrap();
+        index_all(&core).await;
 
         let results = core
             .search("unique_term_123", &[], &[], 10, None, 0.0)

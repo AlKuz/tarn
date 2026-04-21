@@ -1,4 +1,3 @@
-use regex::RegexBuilder;
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 
 use super::TarnMcpServer;
@@ -6,11 +5,12 @@ use super::types::{
     CreateNoteParams, GetTagsParams, GetTagsResponse, RenderMarkdown, ReplaceInNoteParams,
     SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse, tool_error, tool_json, tool_text,
 };
-use crate::core::responses::ReplaceMode;
-use crate::index::{Index, NoteResult};
+use crate::common::VaultPath;
+use crate::core::tarn_core::UpdateMode;
+use crate::index::{Index, NoteResult, find_direct_children};
 use crate::observer::Observer;
 use crate::revisions::RevisionTracker;
-use crate::storage::Storage;
+use crate::storage::{FileContent, Storage};
 
 #[tool_router(vis = "pub(crate)")]
 impl<S, I, O, R> TarnMcpServer<S, I, O, R>
@@ -67,7 +67,10 @@ where
                 if params.rendered {
                     let mut pairs = Vec::new();
                     for nr in &results {
-                        if let Ok(note) = self.core.read(&nr.path.to_string()).await {
+                        if let Ok(file) = self.core.read(&nr.path).await
+                            && let FileContent::Markdown(content) = file.content
+                            && let Ok(note) = self.core.parse_content(&content)
+                        {
                             pairs.push((nr, note));
                         }
                     }
@@ -82,27 +85,22 @@ where
     }
 
     #[tool(
-        description = "Get tag hierarchy with usage statistics. Shows parent-child relationships and optionally lists which notes use each tag."
+        description = "Get tag hierarchy with usage statistics. Shows parent-child relationships."
     )]
     async fn tarn_get_tags(
         &self,
         Parameters(params): Parameters<GetTagsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let include_notes = params.include_notes.unwrap_or(false);
-
-        match self.core.tags(params.prefix.as_deref(), None).await {
-            Ok(entries) => {
-                let tags: Vec<TagInfo> = entries
+        match self.core.list_tags(params.prefix.as_deref(), None).await {
+            Ok(tag_counts) => {
+                let all_tags: Vec<String> = tag_counts.keys().cloned().collect();
+                let tags: Vec<TagInfo> = tag_counts
                     .into_iter()
-                    .map(|e| TagInfo {
-                        tag: e.tag,
-                        count: e.count,
-                        children: e.children,
-                        notes: if include_notes {
-                            Some(e.note_paths.into_iter().map(|p| p.to_string()).collect())
-                        } else {
-                            None
-                        },
+                    .map(|(tag, count)| TagInfo {
+                        children: find_direct_children(&tag, &all_tags),
+                        tag,
+                        count,
+                        notes: None,
                     })
                     .collect();
                 let response = GetTagsResponse { tags };
@@ -117,8 +115,16 @@ where
         &self,
         Parameters(params): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        match self.core.create(&params.path, &params.content).await {
-            Ok(()) => tool_json(&WriteNoteResponse { path: params.path }),
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+        match self
+            .core
+            .write(&path, FileContent::Markdown(params.content))
+            .await
+        {
+            Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
@@ -130,8 +136,16 @@ where
         &self,
         Parameters(params): Parameters<UpdateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        match self.core.update(&params.path, &params.content).await {
-            Ok(()) => tool_json(&WriteNoteResponse { path: params.path }),
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+        match self
+            .core
+            .write(&path, FileContent::Markdown(params.content))
+            .await
+        {
+            Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
@@ -143,39 +157,55 @@ where
         &self,
         Parameters(params): Parameters<ReplaceInNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mode = match params.mode.as_deref() {
-            Some("all") => ReplaceMode::All,
-            Some("regex") => ReplaceMode::Regex,
-            Some("first") | None => ReplaceMode::First,
-            Some(other) => {
-                return tool_error(format!(
-                    "invalid mode: {other} (expected: first, all, or regex)"
-                ));
-            }
-        };
-
-        // Read current content
-        let note = match self.core.read(&params.path).await {
-            Ok(result) => result,
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
             Err(e) => return tool_error(e),
         };
 
-        // Apply replacement
-        let current_content = note.to_string();
-        let new_content = match mode {
-            ReplaceMode::First => current_content.replacen(&params.old, &params.new, 1),
-            ReplaceMode::All => current_content.replace(&params.old, &params.new),
-            ReplaceMode::Regex => {
-                match RegexBuilder::new(&params.old).size_limit(1_000_000).build() {
-                    Ok(re) => re.replace_all(&current_content, &*params.new).into_owned(),
-                    Err(e) => return tool_error(format!("invalid regex: {e}")),
+        match params.mode.as_deref() {
+            Some("first") | None => {
+                // First-match: read, replacen, write back
+                let file = match self.core.read(&path).await {
+                    Ok(f) => f,
+                    Err(e) => return tool_error(e),
+                };
+                let current = match file.content {
+                    FileContent::Markdown(c) => c,
+                    _ => return tool_error("not a markdown file"),
+                };
+                let new_content = current.replacen(&params.old, &params.new, 1);
+                match self
+                    .core
+                    .write(&path, FileContent::Markdown(new_content))
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
                 }
             }
-        };
-
-        match self.core.update(&params.path, &new_content).await {
-            Ok(()) => tool_json(&WriteNoteResponse { path: params.path }),
-            Err(e) => tool_error(e),
+            Some("all") => {
+                match self
+                    .core
+                    .update(&path, &params.old, &params.new, UpdateMode::Text)
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some("regex") => {
+                match self
+                    .core
+                    .update(&path, &params.old, &params.new, UpdateMode::Regex)
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some(other) => tool_error(format!(
+                "invalid mode: {other} (expected: first, all, or regex)"
+            )),
         }
     }
 }

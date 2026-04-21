@@ -14,7 +14,7 @@ use crate::index::Index;
 use crate::index::find_direct_children;
 use crate::observer::Observer;
 use crate::revisions::RevisionTracker;
-use crate::storage::Storage;
+use crate::storage::{FileContent, Storage};
 
 impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
@@ -29,15 +29,12 @@ where
         folder: Option<&str>,
     ) -> McpResult<ReadResourceResult> {
         let folder = parse_folder(folder)?;
+        let list_path = folder.as_ref().unwrap_or(&VaultPath::Root);
 
-        let paths = self
+        let paths = self.core.list_paths(list_path).await.map_err(mcp_err)?;
+        let tag_counts = self
             .core
-            .list(folder.as_ref(), true)
-            .await
-            .map_err(mcp_err)?;
-        let tag_entries = self
-            .core
-            .tags(None, folder.as_ref())
+            .list_tags(None, folder.as_ref())
             .await
             .map_err(mcp_err)?;
 
@@ -45,7 +42,7 @@ where
             name: self.core.vault_name().to_string(),
             folder,
             note_count: paths.len(),
-            tag_count: tag_entries.len(),
+            tag_count: tag_counts.len(),
             storage_type: "local".to_string(),
         };
 
@@ -59,19 +56,19 @@ where
     ) -> McpResult<ReadResourceResult> {
         let folder = parse_folder(folder)?;
 
-        let entries = self
+        let tag_counts = self
             .core
-            .tags(None, folder.as_ref())
+            .list_tags(None, folder.as_ref())
             .await
             .map_err(mcp_err)?;
 
-        let all_tags: Vec<String> = entries.iter().map(|e| e.tag.clone()).collect();
-        let tags: Vec<TagInfo> = entries
+        let all_tags: Vec<String> = tag_counts.keys().cloned().collect();
+        let tags: Vec<TagInfo> = tag_counts
             .into_iter()
-            .map(|e| TagInfo {
-                children: find_direct_children(&e.tag, &all_tags),
-                tag: e.tag,
-                count: e.count,
+            .map(|(tag, count)| TagInfo {
+                children: find_direct_children(&tag, &all_tags),
+                tag,
+                count,
                 notes: None,
             })
             .collect();
@@ -86,12 +83,9 @@ where
         folder: Option<&str>,
     ) -> McpResult<ReadResourceResult> {
         let folder = parse_folder(folder)?;
+        let list_path = folder.as_ref().unwrap_or(&VaultPath::Root);
 
-        let paths = self
-            .core
-            .list(folder.as_ref(), true)
-            .await
-            .map_err(mcp_err)?;
+        let paths = self.core.list_paths(list_path).await.map_err(mcp_err)?;
 
         let mut folder_counts: HashMap<VaultPath, usize> = HashMap::new();
         for path in &paths {
@@ -116,7 +110,14 @@ where
         note_path: &str,
         section_path: &str,
     ) -> McpResult<ReadResourceResult> {
-        let note = self.core.read(note_path).await.map_err(mcp_err)?;
+        let vault_path =
+            VaultPath::new(note_path).map_err(|e| mcp_not_found(format!("invalid path: {e}")))?;
+        let file = self.core.read(&vault_path).await.map_err(mcp_err)?;
+        let content = match file.content {
+            FileContent::Markdown(c) => c,
+            _ => return Err(mcp_err("not a markdown file")),
+        };
+        let note = self.core.parse_content(&content).map_err(mcp_err)?;
 
         let heading_path: Vec<&str> = section_path.split('/').collect();
         let section = TarnCore::<S, I, O, R>::resolve_section(&note, &heading_path);
@@ -169,7 +170,14 @@ where
         uri: &str,
         path: &str,
     ) -> McpResult<ReadResourceResult> {
-        let note = self.core.read(path).await.map_err(mcp_err)?;
+        let vault_path =
+            VaultPath::new(path).map_err(|e| mcp_not_found(format!("invalid path: {e}")))?;
+        let file = self.core.read(&vault_path).await.map_err(mcp_err)?;
+        let content = match file.content {
+            FileContent::Markdown(c) => c,
+            _ => return Err(mcp_err("not a markdown file")),
+        };
+        let note = self.core.parse_content(&content).map_err(mcp_err)?;
 
         let tags: Vec<String> = note.tags().into_iter().map(String::from).collect();
 
