@@ -33,8 +33,6 @@ pub enum CoreError {
     NoMatch(String),
     #[error("invalid regex: {0}")]
     InvalidRegex(#[from] regex::Error),
-    #[error("not implemented: {0}")]
-    NotImplemented(String),
 }
 
 /// Mode for find-and-replace operations.
@@ -222,10 +220,11 @@ where
         content: FileContent,
     ) -> Result<FileMeta, CoreError> {
         let expected_token = self.revisions.get_revision(path).await;
-        let new_rev = self.storage.write(path, content, expected_token).await?;
-        self.revisions.update_revision(path, new_rev).await;
-        let file = self.storage.read(path).await?;
-        Ok(file.meta)
+        let meta = self.storage.write(path, content, expected_token).await?;
+        self.revisions
+            .update_revision(path, meta.revision_token.clone())
+            .await;
+        Ok(meta)
     }
 
     /// Find and replace content within a file.
@@ -276,20 +275,56 @@ where
         Ok(())
     }
 
-    /// Rename/move a file. Fails if the source is not tracked.
-    pub async fn rename(&self, from: &VaultPath, to: &VaultPath) -> Result<FileMeta, CoreError> {
+    /// Rename/move a file, updating wikilinks in other notes and the index.
+    ///
+    /// Returns the new file metadata and the number of notes whose links were updated.
+    pub async fn rename(
+        &self,
+        from: &VaultPath,
+        to: &VaultPath,
+    ) -> Result<(FileMeta, usize), CoreError> {
         let revision = self.tracked_revision(from).await?;
 
-        self.storage.r#move(from, to, revision).await?;
+        // Update wikilinks in notes that reference the old path
+        let old_stem = from.stem();
+        let new_stem = to.stem();
+        let mut links_updated = 0;
 
-        // Update tracker: remove old path, read new path's token
+        if old_stem != new_stem {
+            let backlink_paths = self.backlinks(from).await?;
+            let pattern = format!(
+                r"\[\[(?:[^\]#|]*/)?{}(\]\]|[#|])",
+                regex::escape(old_stem)
+            );
+            let replacement = format!("[[{new_stem}$1");
+            for path in &backlink_paths {
+                if self
+                    .update(path, &pattern, &replacement, UpdateMode::Regex)
+                    .await
+                    .is_ok()
+                {
+                    links_updated += 1;
+                }
+            }
+        }
+
+        // Move the file
+        let meta = self.storage.r#move(from, to, revision).await?;
+
+        // Update tracker
         self.revisions.remove_revision(from).await;
-        let file = self.storage.read(to).await?;
         self.revisions
-            .update_revision(to, file.meta.revision_token.clone())
+            .update_revision(to, meta.revision_token.clone())
             .await;
 
-        Ok(file.meta)
+        // Update index
+        self.delete_index(from).await?;
+        if to.is_note() {
+            let file = self.storage.read(to).await?;
+            self.update_index(&file).await?;
+        }
+
+        Ok((meta, links_updated))
     }
 
     /// List paths under a folder.
@@ -434,8 +469,6 @@ where
         &self.vault_name
     }
 
-    // --- Frontmatter operations (TODO) ---
-
     /// Read the frontmatter from a note file.
     pub async fn read_frontmatter(&self, path: &VaultPath) -> Result<Frontmatter, CoreError> {
         let file = self.storage.read(path).await?;
@@ -447,44 +480,119 @@ where
         Ok(note.frontmatter.unwrap_or_default())
     }
 
-    /// Write the frontmatter to a note file, replacing any existing frontmatter.
+    /// Replace the entire frontmatter of a note.
     pub async fn write_frontmatter(
         &self,
-        _path: &VaultPath,
-        _frontmatter: Frontmatter,
+        path: &VaultPath,
+        frontmatter: Frontmatter,
     ) -> Result<FileMeta, CoreError> {
-        // TODO: read file, strip existing frontmatter, prepend new frontmatter, write back
-        Err(CoreError::NotImplemented("write_frontmatter".to_string()))
+        let file = self.storage.read(path).await?;
+        let content = match file.content {
+            FileContent::Markdown(c) => c,
+            _ => return Err(CoreError::NotMarkdown(path.clone())),
+        };
+        let mut note = self.parse_content(&content)?;
+        note.frontmatter = Some(frontmatter);
+        self.write(path, FileContent::Markdown(note.to_string()))
+            .await
     }
 
-    /// Update specific frontmatter values, merging with existing.
+    /// Update specific frontmatter values: remove keys first, then set values.
     pub async fn update_frontmatter(
         &self,
-        _path: &VaultPath,
-        _values: HashMap<String, FrontmatterValue>,
+        path: &VaultPath,
+        set: HashMap<String, FrontmatterValue>,
+        remove: Vec<String>,
     ) -> Result<FileMeta, CoreError> {
-        // TODO: read file, parse frontmatter, merge values, serialize, write back
-        Err(CoreError::NotImplemented("update_frontmatter".to_string()))
+        let file = self.storage.read(path).await?;
+        let content = match file.content {
+            FileContent::Markdown(c) => c,
+            _ => return Err(CoreError::NotMarkdown(path.clone())),
+        };
+        let mut note = self.parse_content(&content)?;
+        let frontmatter = note.frontmatter.get_or_insert_with(Frontmatter::default);
+
+        // Serialize to JSON map for uniform key handling
+        let mut map = serde_json::to_value(&*frontmatter)
+            .map_err(|e| CoreError::Parse(NoteHandlerError::InvalidFrontmatter(e.to_string())))?;
+        let obj = map
+            .as_object_mut()
+            .ok_or_else(|| CoreError::Parse(NoteHandlerError::InvalidFrontmatter("not an object".to_string())))?;
+
+        // Remove first
+        for key in &remove {
+            obj.remove(key);
+        }
+
+        // Then set
+        for (key, value) in set {
+            let json_value = serde_json::to_value(&value).map_err(|e| {
+                CoreError::Parse(NoteHandlerError::InvalidFrontmatter(e.to_string()))
+            })?;
+            obj.insert(key, json_value);
+        }
+
+        // Deserialize back
+        let updated: Frontmatter = serde_json::from_value(map).map_err(|e| {
+            CoreError::Parse(NoteHandlerError::InvalidFrontmatter(e.to_string()))
+        })?;
+        note.frontmatter = Some(updated);
+        self.write(path, FileContent::Markdown(note.to_string()))
+            .await
     }
 
-    /// Delete specific keys from the frontmatter.
-    pub async fn delete_frontmatter(
-        &self,
-        _path: &VaultPath,
-        _keys: Vec<String>,
-    ) -> Result<FileMeta, CoreError> {
-        // TODO: read file, parse frontmatter, remove keys, serialize, write back
-        Err(CoreError::NotImplemented("delete_frontmatter".to_string()))
+    /// Remove the entire frontmatter block from a note.
+    pub async fn delete_frontmatter(&self, path: &VaultPath) -> Result<FileMeta, CoreError> {
+        let file = self.storage.read(path).await?;
+        let content = match file.content {
+            FileContent::Markdown(c) => c,
+            _ => return Err(CoreError::NotMarkdown(path.clone())),
+        };
+        let mut note = self.parse_content(&content)?;
+        note.frontmatter = None;
+        self.write(path, FileContent::Markdown(note.to_string()))
+            .await
     }
 
-    /// Append content to the end of a note or section.
+    /// Append content to the end of a note.
+    ///
+    /// Reads the file fresh from storage (bypassing tracked revision) to avoid
+    /// conflicts when the note was modified externally since the last read.
     pub async fn append(
         &self,
-        _path: &VaultPath,
-        _content: FileContent,
+        path: &VaultPath,
+        content: FileContent,
     ) -> Result<FileMeta, CoreError> {
-        // TODO: read file, append content (to end of note or end of section), write back
-        Err(CoreError::NotImplemented("append".to_string()))
+        let file = self.storage.read(path).await?;
+        let current = match file.content {
+            FileContent::Markdown(c) => c,
+            _ => return Err(CoreError::NotMarkdown(path.clone())),
+        };
+        let appended = match content {
+            FileContent::Markdown(new) => format!("{current}\n{new}"),
+            _ => return Err(CoreError::NotMarkdown(path.clone())),
+        };
+        let meta = self
+            .storage
+            .write(
+                path,
+                FileContent::Markdown(appended),
+                Some(file.meta.revision_token),
+            )
+            .await?;
+        self.revisions
+            .update_revision(path, meta.revision_token.clone())
+            .await;
+        Ok(meta)
+    }
+
+    /// Copy a file to a new path.
+    pub async fn copy(&self, from: &VaultPath, to: &VaultPath) -> Result<FileMeta, CoreError> {
+        let meta = self.storage.copy(from, to).await?;
+        self.revisions
+            .update_revision(to, meta.revision_token.clone())
+            .await;
+        Ok(meta)
     }
 }
 
@@ -737,8 +845,9 @@ mod tests {
         let (_dir, core) = setup();
         core.write(&vp("old.md"), md("# Old")).await.unwrap();
 
-        let meta = core.rename(&vp("old.md"), &vp("new.md")).await.unwrap();
+        let (meta, links_updated) = core.rename(&vp("old.md"), &vp("new.md")).await.unwrap();
         assert_eq!(meta.path, vp("new.md"));
+        assert_eq!(links_updated, 0);
         assert!(!core.exists(&vp("old.md")).await.unwrap());
         assert!(core.exists(&vp("new.md")).await.unwrap());
     }
@@ -821,7 +930,7 @@ mod tests {
         let old_path = vp("old.md");
         let new_path = vp("new.md");
         core.write(&old_path, md("# Old")).await.unwrap();
-        core.rename(&old_path, &new_path).await.unwrap();
+        let _ = core.rename(&old_path, &new_path).await.unwrap();
 
         assert!(core.revisions.get_revision(&old_path).await.is_none());
         assert!(core.revisions.get_revision(&new_path).await.is_some());
@@ -835,7 +944,7 @@ mod tests {
         let rev = core.revisions.get_revision(&path).await.unwrap();
 
         // Modify file directly via storage to create mismatch
-        let _new_rev = core
+        let _new_meta = core
             .storage
             .write(
                 &path,
@@ -899,5 +1008,237 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    // --- Frontmatter operations ---
+
+    #[tokio::test]
+    async fn test_write_frontmatter() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("# Hello\n\nBody")).await.unwrap();
+
+        let fm = Frontmatter {
+            title: Some("Hello".to_string()),
+            tags: vec!["rust".to_string()],
+            ..Default::default()
+        };
+        core.write_frontmatter(&path, fm).await.unwrap();
+
+        let file = core.read(&path).await.unwrap();
+        match file.content {
+            FileContent::Markdown(c) => {
+                assert!(c.contains("title: Hello"));
+                assert!(c.contains("rust"));
+                assert!(c.contains("# Hello"));
+            }
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_frontmatter_replaces_existing() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("---\ntitle: Old\ntags:\n  - old\n---\n# Note"))
+            .await
+            .unwrap();
+
+        let fm = Frontmatter {
+            title: Some("New".to_string()),
+            ..Default::default()
+        };
+        core.write_frontmatter(&path, fm).await.unwrap();
+
+        let read_fm = core.read_frontmatter(&path).await.unwrap();
+        assert_eq!(read_fm.title, Some("New".to_string()));
+        assert!(read_fm.tags.is_empty()); // old tags gone
+    }
+
+    #[tokio::test]
+    async fn test_update_frontmatter_set() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("---\ntitle: Original\n---\n# Note"))
+            .await
+            .unwrap();
+
+        let mut set = HashMap::new();
+        set.insert(
+            "description".to_string(),
+            FrontmatterValue::Str("A description".to_string()),
+        );
+        core.update_frontmatter(&path, set, vec![]).await.unwrap();
+
+        let fm = core.read_frontmatter(&path).await.unwrap();
+        assert_eq!(fm.title, Some("Original".to_string())); // preserved
+        assert_eq!(fm.description, Some("A description".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_frontmatter_remove() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(
+            &path,
+            md("---\ntitle: Keep\ndescription: Remove me\n---\n# Note"),
+        )
+        .await
+        .unwrap();
+
+        core.update_frontmatter(&path, HashMap::new(), vec!["description".to_string()])
+            .await
+            .unwrap();
+
+        let fm = core.read_frontmatter(&path).await.unwrap();
+        assert_eq!(fm.title, Some("Keep".to_string()));
+        assert_eq!(fm.description, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_frontmatter_remove_then_set() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("---\nstatus: draft\n---\n# Note"))
+            .await
+            .unwrap();
+
+        // Remove "status", then set "status" to new value — set wins
+        let mut set = HashMap::new();
+        set.insert(
+            "status".to_string(),
+            FrontmatterValue::Str("published".to_string()),
+        );
+        core.update_frontmatter(&path, set, vec!["status".to_string()])
+            .await
+            .unwrap();
+
+        let fm = core.read_frontmatter(&path).await.unwrap();
+        assert_eq!(
+            fm.custom.get("status"),
+            Some(&FrontmatterValue::Str("published".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_frontmatter_creates_when_missing() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("# No frontmatter")).await.unwrap();
+
+        let mut set = HashMap::new();
+        set.insert(
+            "title".to_string(),
+            FrontmatterValue::Str("New Title".to_string()),
+        );
+        core.update_frontmatter(&path, set, vec![]).await.unwrap();
+
+        let fm = core.read_frontmatter(&path).await.unwrap();
+        assert_eq!(fm.title, Some("New Title".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_delete_frontmatter() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("---\ntitle: Remove\n---\n# Note\n\nBody"))
+            .await
+            .unwrap();
+
+        core.delete_frontmatter(&path).await.unwrap();
+
+        let file = core.read(&path).await.unwrap();
+        match file.content {
+            FileContent::Markdown(c) => {
+                assert!(!c.contains("---"));
+                assert!(c.contains("# Note"));
+                assert!(c.contains("Body"));
+            }
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    // --- Append ---
+
+    #[tokio::test]
+    async fn test_append() {
+        let (_dir, core) = setup();
+        let path = vp("note.md");
+        core.write(&path, md("# Note\n\nOriginal")).await.unwrap();
+
+        core.append(&path, md("\nAppended content")).await.unwrap();
+
+        let file = core.read(&path).await.unwrap();
+        match file.content {
+            FileContent::Markdown(c) => {
+                assert!(c.contains("Original"));
+                assert!(c.contains("Appended content"));
+            }
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_append_nonexistent_fails() {
+        let (_dir, core) = setup();
+        let err = core
+            .append(&vp("missing.md"), md("content"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Storage(StorageError::NotFound(_))));
+    }
+
+    // --- Copy ---
+
+    #[tokio::test]
+    async fn test_copy() {
+        let (_dir, core) = setup();
+        let from = vp("source.md");
+        let to = vp("dest.md");
+        core.write(&from, md("# Source")).await.unwrap();
+
+        let meta = core.copy(&from, &to).await.unwrap();
+        assert_eq!(meta.path, to);
+        assert!(core.exists(&from).await.unwrap());
+        assert!(core.exists(&to).await.unwrap());
+    }
+
+    // --- Rename with link updates ---
+
+    #[tokio::test]
+    async fn test_rename_updates_wikilinks() {
+        let (_dir, core) = setup();
+        write_and_index(&core, &vp("linker.md"), md("See [[target]] for details.")).await;
+        write_and_index(&core, &vp("target.md"), md("# Target")).await;
+
+        let (meta, links_updated) =
+            core.rename(&vp("target.md"), &vp("renamed.md")).await.unwrap();
+        assert_eq!(meta.path, vp("renamed.md"));
+        assert_eq!(links_updated, 1);
+
+        // The linking note should now reference the new name
+        let file = core.read(&vp("linker.md")).await.unwrap();
+        match file.content {
+            FileContent::Markdown(c) => {
+                assert!(c.contains("[[renamed]]"), "expected updated link, got: {c}");
+                assert!(!c.contains("[[target]]"));
+            }
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rename_same_stem_skips_link_update() {
+        let (_dir, core) = setup();
+        write_and_index(&core, &vp("linker.md"), md("See [[note]] here.")).await;
+        write_and_index(&core, &vp("note.md"), md("# Note")).await;
+
+        // Moving to a different folder but same stem — no link changes needed
+        let (meta, links_updated) = core
+            .rename(&vp("note.md"), &vp("sub/note.md"))
+            .await
+            .unwrap();
+        assert_eq!(meta.path, vp("sub/note.md"));
+        assert_eq!(links_updated, 0);
     }
 }

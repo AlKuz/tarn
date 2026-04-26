@@ -7,6 +7,8 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, de};
 
+use std::collections::HashMap;
+
 use crate::common::VaultPath;
 
 /// Regex for parsing search query tokens.
@@ -204,14 +206,20 @@ pub struct CreateNoteParams {
     pub path: String,
     #[schemars(description = "Markdown content for the new note")]
     pub content: String,
+    #[schemars(description = "Frontmatter as JSON object, rendered to YAML automatically")]
+    pub frontmatter: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateNoteParams {
     #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
     pub path: String,
-    #[schemars(description = "New markdown content for the note")]
+    #[schemars(description = "Markdown content for the note")]
     pub content: String,
+    #[schemars(description = "Frontmatter as JSON object (replace mode only)")]
+    pub frontmatter: Option<HashMap<String, serde_json::Value>>,
+    #[schemars(description = "Write mode: \"replace\" (default) or \"append\"")]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -224,6 +232,37 @@ pub struct ReplaceInNoteParams {
     pub new: String,
     #[schemars(description = "Replacement mode: \"first\" (default), \"all\", or \"regex\"")]
     pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateFrontmatterParams {
+    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
+    pub path: String,
+    #[schemars(description = "Key-value pairs to set or overwrite in frontmatter")]
+    pub set: Option<HashMap<String, serde_json::Value>>,
+    #[schemars(description = "Keys to remove from frontmatter")]
+    pub remove: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteNoteParams {
+    #[schemars(description = "Note path (e.g. \"projects/alpha/design.md\")")]
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RenameNoteParams {
+    #[schemars(description = "Current note path")]
+    pub path: String,
+    #[schemars(description = "New note path")]
+    pub new_path: String,
+    #[serde(default = "default_true")]
+    #[schemars(description = "Update wikilinks in other notes (default: true)")]
+    pub update_links: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

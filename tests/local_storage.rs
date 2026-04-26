@@ -57,7 +57,8 @@ mod revision_conflicts {
         let token1 = storage
             .write(&path, FileContent::Markdown("v1".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         // Modify file externally to change its mtime
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -81,7 +82,8 @@ mod revision_conflicts {
         let token1 = storage
             .write(&path, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         // External modification
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -103,7 +105,8 @@ mod revision_conflicts {
         let token1 = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         fs::write(dir.path().join(from.as_str()), "changed")
@@ -131,7 +134,8 @@ mod delete_and_move {
         let token = storage
             .write(&path, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         assert!(storage.exists(&path).await.unwrap());
 
@@ -149,7 +153,8 @@ mod delete_and_move {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.r#move(&from, &to, token).await.unwrap();
 
@@ -236,7 +241,8 @@ mod directory_creation {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.r#move(&from, &to, token).await.unwrap();
 
@@ -540,7 +546,8 @@ mod access_control {
         let token = storage
             .write(&path, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.deny_access(std::slice::from_ref(&path));
 
@@ -558,7 +565,8 @@ mod access_control {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.deny_access(std::slice::from_ref(&from));
 
@@ -576,7 +584,8 @@ mod access_control {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.deny_access(std::slice::from_ref(&to));
 
@@ -649,7 +658,8 @@ mod access_control {
         let token = storage
             .write(&path, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.read_only_access(std::slice::from_ref(&path));
 
@@ -667,7 +677,8 @@ mod access_control {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.read_only_access(std::slice::from_ref(&from));
 
@@ -685,7 +696,8 @@ mod access_control {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         storage.read_only_access(std::slice::from_ref(&to));
 
@@ -808,7 +820,8 @@ mod image_write {
         let token1 = storage
             .write(&path, FileContent::Image(data_uri.clone()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         // External modification
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1162,7 +1175,8 @@ mod unix_permissions {
         let token = storage
             .write(&from, FileContent::Markdown("content".to_string()), None)
             .await
-            .unwrap();
+            .unwrap()
+            .revision_token;
 
         // Create a readonly directory
         let readonly_dir = dir.path().join("readonly");

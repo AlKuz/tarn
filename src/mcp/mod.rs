@@ -9,9 +9,12 @@
 //!
 //! - `tarn_search_notes` - Full-text search with BM25 ranking (if index configured)
 //! - `tarn_get_tags` - Get tag hierarchy with usage statistics
-//! - `tarn_create_note` - Create a new note (fails if already exists)
-//! - `tarn_update_note` - Update an existing note with revision-based conflict detection
+//! - `tarn_create_note` - Create a new note with optional frontmatter
+//! - `tarn_update_note` - Replace or append note content with revision-based conflict detection
 //! - `tarn_replace_in_note` - Replace text within a note (first, all, or regex modes)
+//! - `tarn_update_frontmatter` - Modify frontmatter keys without rewriting content
+//! - `tarn_delete_note` - Delete a note with conflict detection
+//! - `tarn_rename_note` - Rename/move a note with vault-wide link updates
 //!
 //! ## Resources
 //!

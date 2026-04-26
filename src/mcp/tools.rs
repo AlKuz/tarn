@@ -1,9 +1,12 @@
 use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 
 use super::TarnMcpServer;
+use super::helpers::{frontmatter_from_json, frontmatter_values_from_json};
 use super::types::{
-    CreateNoteParams, GetTagsParams, GetTagsResponse, RenderMarkdown, ReplaceInNoteParams,
-    SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse, tool_error, tool_json, tool_text,
+    CreateNoteParams, DeleteNoteParams, DeleteNoteResponse, GetTagsParams, GetTagsResponse,
+    RenameNoteParams, RenameNoteResponse, RenderMarkdown, ReplaceInNoteParams, SearchParams,
+    TagInfo, UpdateFrontmatterParams, UpdateNoteParams, WriteNoteResponse, tool_error, tool_json,
+    tool_text,
 };
 use crate::common::VaultPath;
 use crate::core::tarn_core::UpdateMode;
@@ -110,7 +113,9 @@ where
         }
     }
 
-    #[tool(description = "Create a new note. Fails if a note already exists at the path.")]
+    #[tool(
+        description = "Create a new note. Fails if a note already exists at the path. Frontmatter is rendered to YAML automatically."
+    )]
     async fn tarn_create_note(
         &self,
         Parameters(params): Parameters<CreateNoteParams>,
@@ -119,18 +124,25 @@ where
             Ok(p) => p,
             Err(e) => return tool_error(e),
         };
-        match self
-            .core
-            .write(&path, FileContent::Markdown(params.content))
-            .await
-        {
+
+        let content = if let Some(fm_json) = params.frontmatter {
+            let fm = match frontmatter_from_json(fm_json) {
+                Ok(f) => f,
+                Err(e) => return tool_error(format!("invalid frontmatter: {e}")),
+            };
+            format!("{fm}\n{}", params.content)
+        } else {
+            params.content
+        };
+
+        match self.core.write(&path, FileContent::Markdown(content)).await {
             Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
 
     #[tool(
-        description = "Update an existing note. Revision control is handled server-side by the revision tracker."
+        description = "Update a note. In replace mode (default), overwrites content with revision check. In append mode, adds content to end without revision check."
     )]
     async fn tarn_update_note(
         &self,
@@ -140,13 +152,36 @@ where
             Ok(p) => p,
             Err(e) => return tool_error(e),
         };
-        match self
-            .core
-            .write(&path, FileContent::Markdown(params.content))
-            .await
-        {
-            Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
-            Err(e) => tool_error(e),
+
+        match params.mode.as_deref() {
+            Some("append") => {
+                match self
+                    .core
+                    .append(&path, FileContent::Markdown(params.content))
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some("replace") | None => {
+                let content = if let Some(fm_json) = params.frontmatter {
+                    let fm = match frontmatter_from_json(fm_json) {
+                        Ok(f) => f,
+                        Err(e) => return tool_error(format!("invalid frontmatter: {e}")),
+                    };
+                    format!("{fm}\n{}", params.content)
+                } else {
+                    params.content
+                };
+                match self.core.write(&path, FileContent::Markdown(content)).await {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some(other) => tool_error(format!(
+                "invalid mode: {other} (expected: replace or append)"
+            )),
         }
     }
 
@@ -206,6 +241,78 @@ where
             Some(other) => tool_error(format!(
                 "invalid mode: {other} (expected: first, all, or regex)"
             )),
+        }
+    }
+
+    #[tool(
+        description = "Modify note frontmatter. Removes keys first, then sets values. Tags are regular YAML values — use set/remove to modify them."
+    )]
+    async fn tarn_update_frontmatter(
+        &self,
+        Parameters(params): Parameters<UpdateFrontmatterParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+
+        let set = if let Some(json_map) = params.set {
+            match frontmatter_values_from_json(json_map) {
+                Ok(v) => v,
+                Err(e) => return tool_error(format!("invalid set values: {e}")),
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+        let remove = params.remove.unwrap_or_default();
+
+        match self.core.update_frontmatter(&path, set, remove).await {
+            Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+            Err(e) => tool_error(e),
+        }
+    }
+
+    #[tool(description = "Delete a note. Fails if the note does not exist.")]
+    async fn tarn_delete_note(
+        &self,
+        Parameters(params): Parameters<DeleteNoteParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+        match self.core.delete(&path).await {
+            Ok(()) => tool_json(&DeleteNoteResponse {
+                path: params.path,
+                deleted: true,
+            }),
+            Err(e) => tool_error(e),
+        }
+    }
+
+    #[tool(
+        description = "Rename or move a note. By default updates wikilinks in other notes that reference it."
+    )]
+    async fn tarn_rename_note(
+        &self,
+        Parameters(params): Parameters<RenameNoteParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let from = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+        let to = match VaultPath::new(&params.new_path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+
+        match self.core.rename(&from, &to).await {
+            Ok((_meta, links_updated)) => tool_json(&RenameNoteResponse {
+                old_path: params.path,
+                new_path: params.new_path,
+                links_updated,
+            }),
+            Err(e) => tool_error(e),
         }
     }
 }

@@ -433,6 +433,187 @@ async fn replace_in_note_regex_mode() {
 }
 
 // =============================================================================
+// tarn_create_note — with frontmatter
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_note_with_frontmatter() {
+    let server = spawn_server(false).await;
+
+    let result = call_tool(
+        &server.client,
+        "tarn_create_note",
+        json!({
+            "path": "test/fm-note.md",
+            "content": "# FM Note\n\nBody content.",
+            "frontmatter": {"title": "FM Note", "tags": ["test", "frontmatter"]}
+        }),
+    )
+    .await;
+
+    assert_eq!(result["path"], "test/fm-note.md");
+
+    let note = read_resource(&server.client, "tarn://note/test/fm-note.md").await;
+    assert_eq!(note["title"], "FM Note");
+    let content = note["content"].as_str().unwrap();
+    assert!(content.contains("# FM Note"));
+    let tags = note["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(tags.contains(&"test"));
+    assert!(tags.contains(&"frontmatter"));
+}
+
+// =============================================================================
+// tarn_update_note — append mode
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_note_append_mode() {
+    let server = spawn_server(false).await;
+
+    call_tool(
+        &server.client,
+        "tarn_create_note",
+        json!({"path": "test/append.md", "content": "# Append\n\nOriginal."}),
+    )
+    .await;
+
+    call_tool(
+        &server.client,
+        "tarn_update_note",
+        json!({
+            "path": "test/append.md",
+            "content": "\n## Added\n\nAppended content.",
+            "mode": "append"
+        }),
+    )
+    .await;
+
+    let note = read_resource(&server.client, "tarn://note/test/append.md").await;
+    let content = note["content"].as_str().unwrap();
+    assert!(content.contains("Original."));
+    assert!(content.contains("Appended content."));
+}
+
+// =============================================================================
+// tarn_update_frontmatter
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_frontmatter_set_and_remove() {
+    let server = spawn_server(false).await;
+
+    // Create a note with frontmatter
+    call_tool(
+        &server.client,
+        "tarn_create_note",
+        json!({
+            "path": "test/fm-update.md",
+            "content": "# FM Update",
+            "frontmatter": {"title": "Original", "status": "draft"}
+        }),
+    )
+    .await;
+
+    // Update: set description, remove status
+    let result = call_tool(
+        &server.client,
+        "tarn_update_frontmatter",
+        json!({
+            "path": "test/fm-update.md",
+            "set": {"description": "A new description"},
+            "remove": ["status"]
+        }),
+    )
+    .await;
+
+    assert_eq!(result["path"], "test/fm-update.md");
+
+    let note = read_resource(&server.client, "tarn://note/test/fm-update.md").await;
+    let fm = &note["frontmatter"];
+    assert_eq!(fm["title"], "Original"); // preserved
+    assert_eq!(fm["description"], "A new description"); // added
+    assert!(fm.get("status").is_none() || fm["status"].is_null()); // removed
+}
+
+// =============================================================================
+// tarn_delete_note
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_note_success() {
+    let server = spawn_server(false).await;
+
+    call_tool(
+        &server.client,
+        "tarn_create_note",
+        json!({"path": "test/to-delete.md", "content": "# Delete Me"}),
+    )
+    .await;
+
+    let result = call_tool(
+        &server.client,
+        "tarn_delete_note",
+        json!({"path": "test/to-delete.md"}),
+    )
+    .await;
+
+    assert_eq!(result["path"], "test/to-delete.md");
+    assert_eq!(result["deleted"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_note_nonexistent_fails() {
+    let server = spawn_server(false).await;
+
+    let error = call_tool_expect_error(
+        &server.client,
+        "tarn_delete_note",
+        json!({"path": "nonexistent.md"}),
+    )
+    .await;
+
+    assert!(
+        error.contains("not found") || error.contains("NoteNotFound"),
+        "expected not found error, got: {error}"
+    );
+}
+
+// =============================================================================
+// tarn_rename_note
+// =============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_note_success() {
+    let server = spawn_server(false).await;
+
+    call_tool(
+        &server.client,
+        "tarn_create_note",
+        json!({"path": "test/old-name.md", "content": "# Old Name"}),
+    )
+    .await;
+
+    let result = call_tool(
+        &server.client,
+        "tarn_rename_note",
+        json!({"path": "test/old-name.md", "new_path": "test/new-name.md"}),
+    )
+    .await;
+
+    assert_eq!(result["old_path"], "test/old-name.md");
+    assert_eq!(result["new_path"], "test/new-name.md");
+
+    // New path should be readable
+    let note = read_resource(&server.client, "tarn://note/test/new-name.md").await;
+    assert_eq!(note["title"], "Old Name");
+}
+
+// =============================================================================
 // Tool Listing
 // =============================================================================
 
@@ -448,7 +629,10 @@ async fn lists_all_tools() {
     assert!(names.contains(&"tarn_create_note"));
     assert!(names.contains(&"tarn_update_note"));
     assert!(names.contains(&"tarn_replace_in_note"));
-    assert_eq!(names.len(), 5);
+    assert!(names.contains(&"tarn_update_frontmatter"));
+    assert!(names.contains(&"tarn_delete_note"));
+    assert!(names.contains(&"tarn_rename_note"));
+    assert_eq!(names.len(), 8);
 }
 
 // =============================================================================

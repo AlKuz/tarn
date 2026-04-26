@@ -238,7 +238,7 @@ impl Storage for LocalStorage {
         path: &VaultPath,
         data: FileContent,
         expected_token: Option<RevisionToken>,
-    ) -> Result<RevisionToken, StorageError> {
+    ) -> Result<FileMeta, StorageError> {
         if self.is_denied(path) || self.is_read_only(path) {
             return Err(StorageError::PermissionDenied(path.clone()));
         }
@@ -277,7 +277,13 @@ impl Storage for LocalStorage {
         let metadata = fs::metadata(&full_path)
             .await
             .map_err(|e| map_io_error(path, e))?;
-        revision_token(path, &metadata)
+        let token = revision_token(path, &metadata)?;
+        Ok(FileMeta {
+            path: path.clone(),
+            size: metadata.len(),
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            revision_token: token,
+        })
     }
 
     async fn delete(
@@ -302,7 +308,7 @@ impl Storage for LocalStorage {
         from: &VaultPath,
         to: &VaultPath,
         expected_token: RevisionToken,
-    ) -> Result<(), StorageError> {
+    ) -> Result<FileMeta, StorageError> {
         if self.is_denied(from) || self.is_read_only(from) {
             return Err(StorageError::PermissionDenied(from.clone()));
         }
@@ -323,10 +329,21 @@ impl Storage for LocalStorage {
 
         fs::rename(&full_from, &full_to)
             .await
-            .map_err(|e| map_io_error(from, e))
+            .map_err(|e| map_io_error(from, e))?;
+
+        let metadata = fs::metadata(&full_to)
+            .await
+            .map_err(|e| map_io_error(to, e))?;
+        let token = revision_token(to, &metadata)?;
+        Ok(FileMeta {
+            path: to.clone(),
+            size: metadata.len(),
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            revision_token: token,
+        })
     }
 
-    async fn copy(&self, from: &VaultPath, to: &VaultPath) -> Result<RevisionToken, StorageError> {
+    async fn copy(&self, from: &VaultPath, to: &VaultPath) -> Result<FileMeta, StorageError> {
         if self.is_denied(from) {
             return Err(StorageError::PermissionDenied(from.clone()));
         }
@@ -350,7 +367,13 @@ impl Storage for LocalStorage {
         let metadata = fs::metadata(&full_to)
             .await
             .map_err(|e| map_io_error(to, e))?;
-        revision_token(to, &metadata)
+        let token = revision_token(to, &metadata)?;
+        Ok(FileMeta {
+            path: to.clone(),
+            size: metadata.len(),
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            revision_token: token,
+        })
     }
 
     async fn exists(&self, path: &VaultPath) -> Result<bool, StorageError> {

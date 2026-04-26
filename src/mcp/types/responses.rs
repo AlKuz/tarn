@@ -52,6 +52,19 @@ pub struct WriteNoteResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DeleteNoteResponse {
+    pub path: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenameNoteResponse {
+    pub old_path: String,
+    pub new_path: String,
+    pub links_updated: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct NoteResourceResponse {
     pub path: String,
     pub title: Option<String>,
