@@ -63,7 +63,7 @@ where
             .map_err(mcp_err)?;
 
         let all_tags: Vec<String> = tag_counts.keys().cloned().collect();
-        let tags: Vec<TagInfo> = tag_counts
+        let mut tags: Vec<TagInfo> = tag_counts
             .into_iter()
             .map(|(tag, count)| TagInfo {
                 children: find_direct_children(&tag, &all_tags),
@@ -71,6 +71,7 @@ where
                 count,
             })
             .collect();
+        tags.sort_by(|a, b| a.tag.cmp(&b.tag));
 
         let response = VaultTagsResponse { folder, tags };
         resource_json(uri, &response)

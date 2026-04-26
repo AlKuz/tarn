@@ -227,8 +227,13 @@ where
 
     /// Write file content to the storage.
     ///
-    /// Creates the file if it does not exist, overwrites if it does.
-    /// Revision control is handled internally via the `RevisionTracker`.
+    /// Creates the file if the revision tracker has no entry for it (no known
+    /// prior revision), or overwrites it using the tracked revision token for
+    /// optimistic concurrency control. Fails with a conflict error if the file
+    /// has changed since it was last tracked.
+    ///
+    /// Requires `start_sync` to have completed before writing existing files,
+    /// so that their revision tokens are already tracked.
     pub async fn write(
         &self,
         path: &VaultPath,

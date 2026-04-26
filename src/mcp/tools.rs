@@ -97,7 +97,7 @@ where
         match self.core.list_tags(params.prefix.as_deref(), None).await {
             Ok(tag_counts) => {
                 let all_tags: Vec<String> = tag_counts.keys().cloned().collect();
-                let tags: Vec<TagInfo> = tag_counts
+                let mut tags: Vec<TagInfo> = tag_counts
                     .into_iter()
                     .map(|(tag, count)| TagInfo {
                         children: find_direct_children(&tag, &all_tags),
@@ -105,6 +105,7 @@ where
                         count,
                     })
                     .collect();
+                tags.sort_by(|a, b| a.tag.cmp(&b.tag));
                 let response = GetTagsResponse { tags };
                 tool_json(&response)
             }
@@ -145,7 +146,7 @@ where
     }
 
     #[tool(
-        description = "Update a note. In replace mode (default), overwrites content with revision check. In append mode, adds content to end without revision check."
+        description = "Update a note. In replace mode (default), overwrites content with revision check. In append mode, adds content to end without requiring a client-supplied revision (server tracks the revision internally)."
     )]
     async fn tarn_update_note(
         &self,
@@ -212,6 +213,9 @@ where
                     _ => return tool_error("not a markdown file"),
                 };
                 let new_content = current.replacen(&params.old, &params.new, 1);
+                if new_content == current {
+                    return tool_error(format!("no match found for: {}", params.old));
+                }
                 match self
                     .core
                     .write(&path, FileContent::Markdown(new_content))

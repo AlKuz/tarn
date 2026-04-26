@@ -232,6 +232,17 @@ impl BM25Index {
     pub fn doc_length(&self, section_path: &VaultPath) -> Option<u32> {
         self.documents.get(section_path).map(|d| d.doc_length)
     }
+    /// Serialize the index state to JSON bytes without writing to disk.
+    pub(super) fn to_bytes(&self) -> Result<Vec<u8>, InMemoryIndexError> {
+        let file = BM25File {
+            version: BM25_PERSIST_VERSION,
+            inverted: self.inverted.clone(),
+            documents: self.documents.clone(),
+            doc_count: self.doc_count,
+            total_doc_length: self.total_doc_length,
+        };
+        Ok(serde_json::to_vec(&file)?)
+    }
 }
 
 impl Scorer for BM25Index {
@@ -260,14 +271,7 @@ impl Persistable for BM25Index {
     type Error = InMemoryIndexError;
 
     fn save(&self, path: &Path) -> Result<(), Self::Error> {
-        let file = BM25File {
-            version: BM25_PERSIST_VERSION,
-            inverted: self.inverted.clone(),
-            documents: self.documents.clone(),
-            doc_count: self.doc_count,
-            total_doc_length: self.total_doc_length,
-        };
-        let bytes = serde_json::to_vec(&file)?;
+        let bytes = self.to_bytes()?;
         std::fs::write(path, &bytes)?;
         Ok(())
     }

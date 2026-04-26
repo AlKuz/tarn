@@ -62,14 +62,22 @@ struct SectionsFile {
     sections: HashMap<VaultPath, IndexEntry>,
 }
 
-fn save_meta(meta: &IndexMeta, path: &std::path::Path) -> Result<(), InMemoryIndexError> {
+fn meta_to_bytes(meta: &IndexMeta) -> Result<Vec<u8>, InMemoryIndexError> {
     let file = MetaFile {
         version: META_VERSION,
         meta: meta.clone(),
     };
-    let bytes = serde_json::to_vec(&file)?;
-    std::fs::write(path, &bytes)?;
-    Ok(())
+    Ok(serde_json::to_vec(&file)?)
+}
+
+fn sections_to_bytes(
+    sections: &HashMap<VaultPath, IndexEntry>,
+) -> Result<Vec<u8>, InMemoryIndexError> {
+    let file = SectionsFile {
+        version: SECTIONS_VERSION,
+        sections: sections.clone(),
+    };
+    Ok(serde_json::to_vec(&file)?)
 }
 
 fn load_meta(path: &std::path::Path) -> Result<Option<IndexMeta>, InMemoryIndexError> {
@@ -84,19 +92,6 @@ fn load_meta(path: &std::path::Path) -> Result<Option<IndexMeta>, InMemoryIndexE
     Ok(Some(file.meta))
 }
 
-fn save_sections(
-    sections: &HashMap<VaultPath, IndexEntry>,
-    path: &std::path::Path,
-) -> Result<(), InMemoryIndexError> {
-    let file = SectionsFile {
-        version: SECTIONS_VERSION,
-        sections: sections.clone(),
-    };
-    let bytes = serde_json::to_vec(&file)?;
-    std::fs::write(path, &bytes)?;
-    Ok(())
-}
-
 fn load_sections(
     path: &std::path::Path,
 ) -> Result<Option<HashMap<VaultPath, IndexEntry>>, InMemoryIndexError> {
@@ -109,6 +104,19 @@ fn load_sections(
         return Ok(None);
     }
     Ok(Some(file.sections))
+}
+
+/// Write `bytes` to `dir/filename` atomically via a temp file + rename.
+async fn atomic_write(
+    dir: &std::path::Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<(), InMemoryIndexError> {
+    let tmp_path = dir.join(format!("{filename}.tmp"));
+    let final_path = dir.join(filename);
+    tokio::fs::write(&tmp_path, bytes).await?;
+    tokio::fs::rename(&tmp_path, &final_path).await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -153,14 +161,22 @@ impl InMemoryIndex {
         if let Some(ref dir) = persistence_path
             && dir.is_dir()
         {
-            if let Some(loaded) = load_meta(&dir.join("meta.json"))? {
-                meta = loaded;
+            match load_meta(&dir.join("meta.json")) {
+                Ok(Some(loaded)) => meta = loaded,
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "corrupt meta index — starting fresh"),
             }
-            if let Some(loaded) = load_sections(&dir.join("sections.json"))? {
-                sections = loaded;
+            match load_sections(&dir.join("sections.json")) {
+                Ok(Some(loaded)) => sections = loaded,
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "corrupt sections index — starting fresh"),
             }
-            bm25.load(&dir.join("bm25.json"))?;
-            tags.load(&dir.join("tags.json"))?;
+            if let Err(e) = bm25.load(&dir.join("bm25.json")) {
+                tracing::warn!(error = %e, "corrupt bm25 index — starting fresh");
+            }
+            if let Err(e) = tags.load(&dir.join("tags.json")) {
+                tracing::warn!(error = %e, "corrupt tag index — starting fresh");
+            }
         }
 
         Ok(Self {
@@ -173,30 +189,37 @@ impl InMemoryIndex {
         })
     }
 
-    /// Save each component to its own file in the persistence folder.
+    /// Save each component to its own file in the persistence folder atomically.
     async fn persist(&self) -> Result<(), InMemoryIndexError> {
         let Some(dir) = &self.persistence_path else {
             return Ok(());
         };
 
-        std::fs::create_dir_all(dir)?;
+        tokio::fs::create_dir_all(dir).await?;
 
-        {
+        // Serialize each component while briefly holding each lock.
+        let meta_bytes = {
             let meta = self.meta.read().await;
-            save_meta(&meta, &dir.join("meta.json"))?;
-        }
-        {
+            meta_to_bytes(&meta)?
+        };
+        let sections_bytes = {
             let sections = self.sections.read().await;
-            save_sections(&sections, &dir.join("sections.json"))?;
-        }
-        {
+            sections_to_bytes(&sections)?
+        };
+        let bm25_bytes = {
             let bm25 = self.bm25_index.read().await;
-            bm25.save(&dir.join("bm25.json"))?;
-        }
-        {
+            bm25.to_bytes()?
+        };
+        let tags_bytes = {
             let tags = self.tag_index.read().await;
-            tags.save(&dir.join("tags.json"))?;
-        }
+            tags.to_bytes()?
+        };
+
+        // Write each component atomically (temp file + rename).
+        atomic_write(dir, "meta.json", &meta_bytes).await?;
+        atomic_write(dir, "sections.json", &sections_bytes).await?;
+        atomic_write(dir, "bm25.json", &bm25_bytes).await?;
+        atomic_write(dir, "tags.json", &tags_bytes).await?;
 
         Ok(())
     }

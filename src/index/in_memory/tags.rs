@@ -208,6 +208,16 @@ impl TagIndex {
     pub fn tags_for_section(&self, section_path: &VaultPath) -> Option<&HashSet<String>> {
         self.reverse.get(section_path)
     }
+    /// Serialize the index state to JSON bytes without writing to disk.
+    pub(super) fn to_bytes(&self) -> Result<Vec<u8>, InMemoryIndexError> {
+        let file = TagsFile {
+            version: TAGS_PERSIST_VERSION,
+            index: self.index.clone(),
+            reverse: self.reverse.clone(),
+            section_trigrams: self.section_trigrams.clone(),
+        };
+        Ok(serde_json::to_vec(&file)?)
+    }
 }
 
 impl Scorer for TagIndex {
@@ -273,13 +283,7 @@ impl Persistable for TagIndex {
     type Error = InMemoryIndexError;
 
     fn save(&self, path: &Path) -> Result<(), Self::Error> {
-        let file = TagsFile {
-            version: TAGS_PERSIST_VERSION,
-            index: self.index.clone(),
-            reverse: self.reverse.clone(),
-            section_trigrams: self.section_trigrams.clone(),
-        };
-        let bytes = serde_json::to_vec(&file)?;
+        let bytes = self.to_bytes()?;
         std::fs::write(path, &bytes)?;
         Ok(())
     }

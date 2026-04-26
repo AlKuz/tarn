@@ -62,7 +62,7 @@ impl InMemoryRevisionTracker {
             return;
         };
 
-        if let Err(e) = std::fs::create_dir_all(dir) {
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
             tracing::warn!(path = %dir.display(), error = %e, "failed to create revisions directory");
             return;
         }
@@ -82,8 +82,13 @@ impl InMemoryRevisionTracker {
         drop(guard);
 
         let file_path = dir.join(REVISIONS_FILE);
-        if let Err(e) = std::fs::write(&file_path, &bytes) {
-            tracing::warn!(path = %file_path.display(), error = %e, "failed to persist revisions");
+        let tmp_path = dir.join(format!("{}.tmp", REVISIONS_FILE));
+        if let Err(e) = tokio::fs::write(&tmp_path, &bytes).await {
+            tracing::warn!(path = %tmp_path.display(), error = %e, "failed to write revisions tmp file");
+            return;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp_path, &file_path).await {
+            tracing::warn!(path = %file_path.display(), error = %e, "failed to rename revisions tmp file");
         }
     }
 }
