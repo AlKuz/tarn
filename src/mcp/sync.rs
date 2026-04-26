@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
@@ -42,18 +42,17 @@ impl Drop for SyncHandle {
 
 /// Start the event sync pipeline.
 ///
-/// Creates an in-memory event queue (mpsc channel) as a single event bus.
-/// The observer and `review_changes()` both send events to this queue.
-/// A single consumer task reads events and updates the index and revision tracker.
+/// Creates an in-memory event queue (mpsc channel) for live observer events.
+/// Review events are processed directly and synchronously before returning,
+/// so the caller can rely on a ready index after return.
 ///
-/// Startup order: the consumer is spawned first so it is ready to drain events,
-/// then the observer starts watching for live changes, then review events are
-/// pushed into the queue. Duplicate events (observer re-reports a change that
-/// review already emitted) are handled by the idempotency of
-/// `update_index`/`delete_index`.
+/// Startup order:
+/// 1. Consumer task is spawned to drain the channel.
+/// 2. Observer is spawned, sending live events into the channel.
+/// 3. Review events are processed inline (not through the channel).
 ///
-/// This function blocks until all review events are fully processed (index
-/// and revisions updated), so the caller can rely on a ready index after return.
+/// Duplicate events (observer re-reports a change that review already handled)
+/// are safe because `update_index`/`delete_index` are idempotent.
 pub async fn start_sync<S, I, O, R>(
     core: &Arc<TarnCore<S, I, O, R>>,
 ) -> Result<SyncHandle, CoreError>
@@ -65,31 +64,14 @@ where
 {
     let (tx, rx) = mpsc::channel::<StorageEvent>(512);
 
-    // Collect review events upfront so the count is known before spawning tasks.
-    // review_changes() already materializes into a Vec internally, so this adds
-    // no extra memory.
-    tracing::info!("reviewing changes...");
-    let review_stream = core.review_changes().await?;
-    tokio::pin!(review_stream);
-    let mut review_events = Vec::new();
-    while let Some(event) = review_stream.next().await {
-        match event {
-            Ok(event) => review_events.push(event),
-            Err(e) => tracing::warn!(error = %e, "review event error"),
-        }
-    }
-    let review_count = review_events.len() as u64;
-
     // Task 1: Consumer ← queue
-    // Spawned first so it is ready to drain events before any sender pushes.
-    let (review_done_tx, review_done_rx) = oneshot::channel::<()>();
+    // Spawned first so it is ready to drain observer events.
     let consumer_core = core.clone();
     let consumer_task = tokio::spawn(async move {
-        consume_events(consumer_core, rx, review_count, review_done_tx).await;
+        consume_events(consumer_core, rx).await;
     });
 
     // Task 2: Observer → queue
-    let observer_tx = tx.clone();
     let observer_core = core.clone();
     let observer_task = tokio::spawn(async move {
         let stream = match observer_core.listen_changes().await {
@@ -103,7 +85,7 @@ where
         while let Some(event) = stream.next().await {
             match event {
                 Ok(event) => {
-                    if observer_tx.send(event).await.is_err() {
+                    if tx.send(event).await.is_err() {
                         break;
                     }
                 }
@@ -114,18 +96,16 @@ where
         }
     });
 
-    // Push review events into the queue.
-    // Consumer is already draining, so no deadlock regardless of event count.
-    for event in review_events {
-        if tx.send(event).await.is_err() {
-            tracing::warn!("event consumer dropped during review");
-            break;
+    // Process review events directly — index is ready when this loop finishes.
+    tracing::info!("reviewing changes...");
+    let review_stream = core.review_changes().await?;
+    tokio::pin!(review_stream);
+    while let Some(event) = review_stream.next().await {
+        match event {
+            Ok(event) => process_event(core, &event).await,
+            Err(e) => tracing::warn!(error = %e, "review event error"),
         }
     }
-    drop(tx); // Only observer_tx remains as a sender
-
-    // Block until all review events are indexed
-    let _ = review_done_rx.await;
     tracing::info!("changes reviewed");
     tracing::info!("index sync started");
 
@@ -135,61 +115,45 @@ where
 async fn consume_events<S, I, O, R>(
     core: Arc<TarnCore<S, I, O, R>>,
     mut rx: mpsc::Receiver<StorageEvent>,
-    review_count: u64,
-    review_done: oneshot::Sender<()>,
 ) where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
     R: RevisionTracker + Send + Sync + 'static,
 {
-    let mut processed: u64 = 0;
-    let mut review_done = Some(review_done);
-
-    // Signal immediately if there were no review events
-    if review_count == 0
-        && let Some(tx) = review_done.take()
-    {
-        let _ = tx.send(());
-    }
-
     while let Some(event) = rx.recv().await {
-        match event {
-            StorageEvent::Created { ref path, .. } | StorageEvent::Updated { ref path, .. } => {
-                match core.read(path).await {
-                    Ok(file) => {
-                        if let Err(e) = core.update_index(&file).await {
-                            tracing::warn!(path = %path, error = %e, "failed to update index");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            path = %path, error = %e,
-                            "failed to read file for indexing (may have been deleted)"
-                        );
-                    }
-                }
-            }
-            StorageEvent::Deleted { ref path } => {
-                if let Err(e) = core.delete_index(path).await {
-                    tracing::warn!(path = %path, error = %e, "failed to delete from index");
-                }
-            }
-        }
-
-        processed += 1;
-        if review_done.is_some()
-            && processed >= review_count
-            && let Some(tx) = review_done.take()
-        {
-            let _ = tx.send(());
-        }
+        process_event(&core, &event).await;
     }
-
-    // Safety: signal if consumer exits before reaching the count
-    if let Some(tx) = review_done {
-        let _ = tx.send(());
-    }
-
     tracing::debug!("event consumer finished (all senders dropped)");
+}
+
+async fn process_event<S, I, O, R>(core: &Arc<TarnCore<S, I, O, R>>, event: &StorageEvent)
+where
+    S: Storage + Send + Sync + 'static,
+    I: Index + Send + Sync + 'static,
+    O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
+{
+    match event {
+        StorageEvent::Created { path, .. } | StorageEvent::Updated { path, .. } => {
+            match core.read(path).await {
+                Ok(file) => {
+                    if let Err(e) = core.update_index(&file).await {
+                        tracing::warn!(path = %path, error = %e, "failed to update index");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path, error = %e,
+                        "failed to read file for indexing (may have been deleted)"
+                    );
+                }
+            }
+        }
+        StorageEvent::Deleted { path } => {
+            if let Err(e) = core.delete_index(path).await {
+                tracing::warn!(path = %path, error = %e, "failed to delete from index");
+            }
+        }
+    }
 }
