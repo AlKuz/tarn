@@ -107,6 +107,9 @@ fn load_sections(
 }
 
 /// Write `bytes` to `dir/filename` atomically via a temp file + rename.
+///
+/// On rename failure, attempts to clean up the temporary file to avoid
+/// leaving orphaned `.tmp` files on disk.
 async fn atomic_write(
     dir: &std::path::Path,
     filename: &str,
@@ -115,7 +118,10 @@ async fn atomic_write(
     let tmp_path = dir.join(format!("{filename}.tmp"));
     let final_path = dir.join(filename);
     tokio::fs::write(&tmp_path, bytes).await?;
-    tokio::fs::rename(&tmp_path, &final_path).await?;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e.into());
+    }
     Ok(())
 }
 

@@ -88,6 +88,7 @@ impl InMemoryRevisionTracker {
             return;
         }
         if let Err(e) = tokio::fs::rename(&tmp_path, &file_path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
             tracing::warn!(path = %file_path.display(), error = %e, "failed to rename revisions tmp file");
         }
     }
