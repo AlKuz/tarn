@@ -196,8 +196,6 @@ pub struct SearchParams {
 pub struct GetTagsParams {
     #[schemars(description = "Filter tags by prefix (e.g. \"project/\")")]
     pub prefix: Option<String>,
-    #[schemars(description = "Include list of notes per tag (default: false)")]
-    pub include_notes: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

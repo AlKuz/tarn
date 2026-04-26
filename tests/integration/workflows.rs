@@ -159,7 +159,7 @@ async fn full_research_session() {
     let tags = call_tool(
         &server.client,
         "tarn_get_tags",
-        json!({"prefix": "programming/web", "include_notes": true}),
+        json!({"prefix": "programming/web"}),
     )
     .await;
     let web_tag = tags["tags"]

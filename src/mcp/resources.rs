@@ -69,7 +69,6 @@ where
                 children: find_direct_children(&tag, &all_tags),
                 tag,
                 count,
-                notes: None,
             })
             .collect();
 

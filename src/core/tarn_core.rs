@@ -210,6 +210,21 @@ where
         Ok(Note::try_parse(content)?)
     }
 
+    /// Create a new file in the storage.
+    ///
+    /// Fails with `StorageError::FileAlreadyExists` if the file already exists.
+    pub async fn create(
+        &self,
+        path: &VaultPath,
+        content: FileContent,
+    ) -> Result<FileMeta, CoreError> {
+        let meta = self.storage.write(path, content, None).await?;
+        self.revisions
+            .update_revision(path, meta.revision_token.clone())
+            .await;
+        Ok(meta)
+    }
+
     /// Write file content to the storage.
     ///
     /// Creates the file if it does not exist, overwrites if it does.
@@ -275,27 +290,40 @@ where
         Ok(())
     }
 
-    /// Rename/move a file, updating wikilinks in other notes and the index.
+    /// Rename/move a file, optionally updating wikilinks in other notes.
     ///
+    /// The file is moved first to ensure vault consistency: if the move fails,
+    /// no backlinks have been modified. Backlink updates are best-effort after
+    /// the move succeeds.
+    ///
+    /// When `update_links` is true, wikilinks referencing the old path are rewritten.
     /// Returns the new file metadata and the number of notes whose links were updated.
     pub async fn rename(
         &self,
         from: &VaultPath,
         to: &VaultPath,
+        update_links: bool,
     ) -> Result<(FileMeta, usize), CoreError> {
         let revision = self.tracked_revision(from).await?;
 
-        // Update wikilinks in notes that reference the old path
+        // Move the file first — if this fails, nothing else has changed
+        let meta = self.storage.r#move(from, to, revision).await?;
+
+        // Update tracker
+        self.revisions.remove_revision(from).await;
+        self.revisions
+            .update_revision(to, meta.revision_token.clone())
+            .await;
+
+        // Update wikilinks in notes that reference the old path.
+        // backlinks(from) still works because the index hasn't been updated yet.
         let old_stem = from.stem();
         let new_stem = to.stem();
         let mut links_updated = 0;
 
-        if old_stem != new_stem {
+        if update_links && old_stem != new_stem {
             let backlink_paths = self.backlinks(from).await?;
-            let pattern = format!(
-                r"\[\[(?:[^\]#|]*/)?{}(\]\]|[#|])",
-                regex::escape(old_stem)
-            );
+            let pattern = format!(r"\[\[(?:[^\]#|]*/)?{}(\]\]|[#|])", regex::escape(old_stem));
             let replacement = format!("[[{new_stem}$1");
             for path in &backlink_paths {
                 if self
@@ -307,15 +335,6 @@ where
                 }
             }
         }
-
-        // Move the file
-        let meta = self.storage.r#move(from, to, revision).await?;
-
-        // Update tracker
-        self.revisions.remove_revision(from).await;
-        self.revisions
-            .update_revision(to, meta.revision_token.clone())
-            .await;
 
         // Update index
         self.delete_index(from).await?;
@@ -515,9 +534,11 @@ where
         // Serialize to JSON map for uniform key handling
         let mut map = serde_json::to_value(&*frontmatter)
             .map_err(|e| CoreError::Parse(NoteHandlerError::InvalidFrontmatter(e.to_string())))?;
-        let obj = map
-            .as_object_mut()
-            .ok_or_else(|| CoreError::Parse(NoteHandlerError::InvalidFrontmatter("not an object".to_string())))?;
+        let obj = map.as_object_mut().ok_or_else(|| {
+            CoreError::Parse(NoteHandlerError::InvalidFrontmatter(
+                "not an object".to_string(),
+            ))
+        })?;
 
         // Remove first
         for key in &remove {
@@ -533,9 +554,8 @@ where
         }
 
         // Deserialize back
-        let updated: Frontmatter = serde_json::from_value(map).map_err(|e| {
-            CoreError::Parse(NoteHandlerError::InvalidFrontmatter(e.to_string()))
-        })?;
+        let updated: Frontmatter = serde_json::from_value(map)
+            .map_err(|e| CoreError::Parse(NoteHandlerError::InvalidFrontmatter(e.to_string())))?;
         note.frontmatter = Some(updated);
         self.write(path, FileContent::Markdown(note.to_string()))
             .await
@@ -556,8 +576,9 @@ where
 
     /// Append content to the end of a note.
     ///
-    /// Reads the file fresh from storage (bypassing tracked revision) to avoid
-    /// conflicts when the note was modified externally since the last read.
+    /// Reads the file fresh from storage and appends the new content.
+    /// Uses storage-level revision check — may fail with a conflict error
+    /// if the file is modified between the read and write.
     pub async fn append(
         &self,
         path: &VaultPath,
@@ -646,6 +667,31 @@ mod tests {
         core.write(path, content).await.unwrap();
         let file = core.read(path).await.unwrap();
         core.update_index(&file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_and_read() {
+        let (_dir, core) = setup();
+        core.create(&vp("hello.md"), md("# Hello\nWorld"))
+            .await
+            .unwrap();
+
+        let file = core.read(&vp("hello.md")).await.unwrap();
+        match file.content {
+            FileContent::Markdown(content) => assert_eq!(content.trim(), "# Hello\nWorld"),
+            _ => panic!("expected markdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_existing() {
+        let (_dir, core) = setup();
+        core.create(&vp("note.md"), md("v1")).await.unwrap();
+        let err = core.create(&vp("note.md"), md("v2")).await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::Storage(_)),
+            "expected storage error, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -845,7 +891,10 @@ mod tests {
         let (_dir, core) = setup();
         core.write(&vp("old.md"), md("# Old")).await.unwrap();
 
-        let (meta, links_updated) = core.rename(&vp("old.md"), &vp("new.md")).await.unwrap();
+        let (meta, links_updated) = core
+            .rename(&vp("old.md"), &vp("new.md"), true)
+            .await
+            .unwrap();
         assert_eq!(meta.path, vp("new.md"));
         assert_eq!(links_updated, 0);
         assert!(!core.exists(&vp("old.md")).await.unwrap());
@@ -855,7 +904,10 @@ mod tests {
     #[tokio::test]
     async fn test_rename_untracked_fails() {
         let (_dir, core) = setup();
-        let err = core.rename(&vp("old.md"), &vp("new.md")).await.unwrap_err();
+        let err = core
+            .rename(&vp("old.md"), &vp("new.md"), true)
+            .await
+            .unwrap_err();
         assert!(matches!(err, CoreError::NoteNotFound(_)));
     }
 
@@ -930,7 +982,7 @@ mod tests {
         let old_path = vp("old.md");
         let new_path = vp("new.md");
         core.write(&old_path, md("# Old")).await.unwrap();
-        let _ = core.rename(&old_path, &new_path).await.unwrap();
+        let _ = core.rename(&old_path, &new_path, true).await.unwrap();
 
         assert!(core.revisions.get_revision(&old_path).await.is_none());
         assert!(core.revisions.get_revision(&new_path).await.is_some());
@@ -1211,8 +1263,10 @@ mod tests {
         write_and_index(&core, &vp("linker.md"), md("See [[target]] for details.")).await;
         write_and_index(&core, &vp("target.md"), md("# Target")).await;
 
-        let (meta, links_updated) =
-            core.rename(&vp("target.md"), &vp("renamed.md")).await.unwrap();
+        let (meta, links_updated) = core
+            .rename(&vp("target.md"), &vp("renamed.md"), true)
+            .await
+            .unwrap();
         assert_eq!(meta.path, vp("renamed.md"));
         assert_eq!(links_updated, 1);
 
@@ -1235,7 +1289,7 @@ mod tests {
 
         // Moving to a different folder but same stem — no link changes needed
         let (meta, links_updated) = core
-            .rename(&vp("note.md"), &vp("sub/note.md"))
+            .rename(&vp("note.md"), &vp("sub/note.md"), true)
             .await
             .unwrap();
         assert_eq!(meta.path, vp("sub/note.md"));

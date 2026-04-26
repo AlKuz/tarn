@@ -286,17 +286,20 @@ async fn create_note_success() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_note_overwrites_existing() {
+async fn create_note_rejects_existing() {
     let server = spawn_server(false).await;
 
-    let result = call_tool(
+    let error = call_tool_expect_error(
         &server.client,
         "tarn_create_note",
         json!({"path": "wiki/Rust.md", "content": "# Overwritten"}),
     )
     .await;
 
-    assert_eq!(result["path"], "wiki/Rust.md");
+    assert!(
+        error.contains("already exists"),
+        "expected 'already exists' error, got: {error}"
+    );
 }
 
 // =============================================================================

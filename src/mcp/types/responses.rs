@@ -10,8 +10,6 @@ pub struct TagInfo {
     pub tag: String,
     pub count: usize,
     pub children: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

@@ -12,10 +12,16 @@ use crate::revisions::errors::RevisionTrackerError;
 const REVISIONS_PERSIST_VERSION: u32 = 1;
 const REVISIONS_FILE: &str = "revisions.json";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct RevisionsFile {
     version: u32,
     revisions: HashMap<VaultPath, RevisionToken>,
+}
+
+#[derive(Serialize)]
+struct RevisionsFileRef<'a> {
+    version: u32,
+    revisions: &'a HashMap<VaultPath, RevisionToken>,
 }
 
 pub struct InMemoryRevisionTracker {
@@ -56,18 +62,28 @@ impl InMemoryRevisionTracker {
             return;
         };
 
-        if std::fs::create_dir_all(dir).is_err() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!(path = %dir.display(), error = %e, "failed to create revisions directory");
             return;
         }
 
         let guard = self.revisions.read().await;
-        let file = RevisionsFile {
+        let file = RevisionsFileRef {
             version: REVISIONS_PERSIST_VERSION,
-            revisions: guard.clone(),
+            revisions: &guard,
         };
+        let bytes = match serde_json::to_vec(&file) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize revisions");
+                return;
+            }
+        };
+        drop(guard);
 
-        if let Ok(bytes) = serde_json::to_vec(&file) {
-            let _ = std::fs::write(dir.join(REVISIONS_FILE), &bytes);
+        let file_path = dir.join(REVISIONS_FILE);
+        if let Err(e) = std::fs::write(&file_path, &bytes) {
+            tracing::warn!(path = %file_path.display(), error = %e, "failed to persist revisions");
         }
     }
 }

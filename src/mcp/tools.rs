@@ -103,7 +103,6 @@ where
                         children: find_direct_children(&tag, &all_tags),
                         tag,
                         count,
-                        notes: None,
                     })
                     .collect();
                 let response = GetTagsResponse { tags };
@@ -135,7 +134,11 @@ where
             params.content
         };
 
-        match self.core.write(&path, FileContent::Markdown(content)).await {
+        match self
+            .core
+            .create(&path, FileContent::Markdown(content))
+            .await
+        {
             Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
@@ -306,7 +309,7 @@ where
             Err(e) => return tool_error(e),
         };
 
-        match self.core.rename(&from, &to).await {
+        match self.core.rename(&from, &to, params.update_links).await {
             Ok((_meta, links_updated)) => tool_json(&RenameNoteResponse {
                 old_path: params.path,
                 new_path: params.new_path,

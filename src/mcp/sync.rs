@@ -46,9 +46,11 @@ impl Drop for SyncHandle {
 /// The observer and `review_changes()` both send events to this queue.
 /// A single consumer task reads events and updates the index and revision tracker.
 ///
-/// The observer is started **before** `review_changes()` to avoid missing
-/// changes that occur during the review window. Duplicate events are handled
-/// by the idempotency of `update_index`/`delete_index`.
+/// Startup order: the consumer is spawned first so it is ready to drain events,
+/// then the observer starts watching for live changes, then review events are
+/// pushed into the queue. Duplicate events (observer re-reports a change that
+/// review already emitted) are handled by the idempotency of
+/// `update_index`/`delete_index`.
 ///
 /// This function blocks until all review events are fully processed (index
 /// and revisions updated), so the caller can rely on a ready index after return.
@@ -63,7 +65,30 @@ where
 {
     let (tx, rx) = mpsc::channel::<StorageEvent>(512);
 
-    // Task 1: Observer → queue
+    // Collect review events upfront so the count is known before spawning tasks.
+    // review_changes() already materializes into a Vec internally, so this adds
+    // no extra memory.
+    tracing::info!("reviewing changes...");
+    let review_stream = core.review_changes().await?;
+    tokio::pin!(review_stream);
+    let mut review_events = Vec::new();
+    while let Some(event) = review_stream.next().await {
+        match event {
+            Ok(event) => review_events.push(event),
+            Err(e) => tracing::warn!(error = %e, "review event error"),
+        }
+    }
+    let review_count = review_events.len() as u64;
+
+    // Task 1: Consumer ← queue
+    // Spawned first so it is ready to drain events before any sender pushes.
+    let (review_done_tx, review_done_rx) = oneshot::channel::<()>();
+    let consumer_core = core.clone();
+    let consumer_task = tokio::spawn(async move {
+        consume_events(consumer_core, rx, review_count, review_done_tx).await;
+    });
+
+    // Task 2: Observer → queue
     let observer_tx = tx.clone();
     let observer_core = core.clone();
     let observer_task = tokio::spawn(async move {
@@ -89,36 +114,15 @@ where
         }
     });
 
-    // Reconcile offline changes → queue
-    tracing::info!("reviewing changes...");
-    let mut review_count: u64 = 0;
-    {
-        let review_stream = core.review_changes().await?;
-        tokio::pin!(review_stream);
-        while let Some(event) = review_stream.next().await {
-            match event {
-                Ok(event) => {
-                    if tx.send(event).await.is_err() {
-                        tracing::warn!("event consumer dropped during review");
-                        break;
-                    }
-                    review_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "review event error");
-                }
-            }
+    // Push review events into the queue.
+    // Consumer is already draining, so no deadlock regardless of event count.
+    for event in review_events {
+        if tx.send(event).await.is_err() {
+            tracing::warn!("event consumer dropped during review");
+            break;
         }
     }
     drop(tx); // Only observer_tx remains as a sender
-
-    // Task 2: Consumer ← queue
-    // Uses a oneshot to signal when all review events have been processed.
-    let (review_done_tx, review_done_rx) = oneshot::channel::<()>();
-    let consumer_core = core.clone();
-    let consumer_task = tokio::spawn(async move {
-        consume_events(consumer_core, rx, review_count, review_done_tx).await;
-    });
 
     // Block until all review events are indexed
     let _ = review_done_rx.await;
