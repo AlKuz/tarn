@@ -1,43 +1,27 @@
-use regex::RegexBuilder;
-use rmcp::{
-    handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content},
-    tool, tool_router,
-};
+use rmcp::{handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 
 use super::TarnMcpServer;
+use super::helpers::{frontmatter_from_json, frontmatter_values_from_json};
 use super::types::{
-    CreateNoteParams, GetTagsParams, GetTagsResponse, RenderMarkdown, ReplaceInNoteParams,
-    SearchParams, TagInfo, UpdateNoteParams, WriteNoteResponse,
+    CreateNoteParams, DeleteNoteParams, DeleteNoteResponse, GetTagsParams, GetTagsResponse,
+    RenameNoteParams, RenameNoteResponse, RenderMarkdown, ReplaceInNoteParams, SearchParams,
+    TagInfo, UpdateFrontmatterParams, UpdateNoteParams, WriteNoteResponse, tool_error, tool_json,
+    tool_text,
 };
-use crate::common::RevisionToken;
-use crate::core::responses::ReplaceMode;
-use crate::index::{Index, NoteResult};
+use crate::common::VaultPath;
+use crate::core::tarn_core::UpdateMode;
+use crate::index::{Index, NoteResult, find_direct_children};
 use crate::observer::Observer;
-use crate::storage::Storage;
-
-fn tool_json(
-    response: &(impl serde::Serialize + ?Sized),
-) -> Result<CallToolResult, rmcp::ErrorData> {
-    let value = serde_json::to_value(response)
-        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::structured(value))
-}
-
-fn tool_text(text: String) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(text)]))
-}
-
-fn tool_error(e: impl std::fmt::Display) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
-}
+use crate::revisions::RevisionTracker;
+use crate::storage::{FileContent, Storage};
 
 #[tool_router(vis = "pub(crate)")]
-impl<S, I, O> TarnMcpServer<S, I, O>
+impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     #[tool(
         description = "Search across the vault. Returns notes ranked by relevance with section scores. Supports text search, tag filters (tag:name), and folder filters (folder:path). Set rendered=true to get markdown content instead of JSON."
@@ -86,7 +70,10 @@ where
                 if params.rendered {
                     let mut pairs = Vec::new();
                     for nr in &results {
-                        if let Ok((note, _)) = self.core.read(&nr.path.to_string()).await {
+                        if let Ok(file) = self.core.read(&nr.path).await
+                            && let FileContent::Markdown(content) = file.content
+                            && let Ok(note) = self.core.parse_content(&content)
+                        {
                             pairs.push((nr, note));
                         }
                     }
@@ -101,29 +88,24 @@ where
     }
 
     #[tool(
-        description = "Get tag hierarchy with usage statistics. Shows parent-child relationships and optionally lists which notes use each tag."
+        description = "Get tag hierarchy with usage statistics. Shows parent-child relationships."
     )]
     async fn tarn_get_tags(
         &self,
         Parameters(params): Parameters<GetTagsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let include_notes = params.include_notes.unwrap_or(false);
-
-        match self.core.tags(params.prefix.as_deref(), None).await {
-            Ok(entries) => {
-                let tags: Vec<TagInfo> = entries
+        match self.core.list_tags(params.prefix.as_deref(), None).await {
+            Ok(tag_counts) => {
+                let all_tags: Vec<String> = tag_counts.keys().cloned().collect();
+                let mut tags: Vec<TagInfo> = tag_counts
                     .into_iter()
-                    .map(|e| TagInfo {
-                        tag: e.tag,
-                        count: e.count,
-                        children: e.children,
-                        notes: if include_notes {
-                            Some(e.note_paths.into_iter().map(|p| p.to_string()).collect())
-                        } else {
-                            None
-                        },
+                    .map(|(tag, count)| TagInfo {
+                        children: find_direct_children(&tag, &all_tags),
+                        tag,
+                        count,
                     })
                     .collect();
+                tags.sort_by(|a, b| a.tag.cmp(&b.tag));
                 let response = GetTagsResponse { tags };
                 tool_json(&response)
             }
@@ -131,44 +113,79 @@ where
         }
     }
 
-    #[tool(description = "Create a new note. Fails if a note already exists at the path.")]
+    #[tool(
+        description = "Create a new note. Fails if a note already exists at the path. Frontmatter is rendered to YAML automatically."
+    )]
     async fn tarn_create_note(
         &self,
         Parameters(params): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        match self.core.write(&params.path, &params.content, None).await {
-            Ok(revision) => {
-                let response = WriteNoteResponse {
-                    path: params.path,
-                    revision,
-                };
-                tool_json(&response)
-            }
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+
+        let content = if let Some(fm_json) = params.frontmatter {
+            let fm = match frontmatter_from_json(fm_json) {
+                Ok(f) => f,
+                Err(e) => return tool_error(format!("invalid frontmatter: {e}")),
+            };
+            format!("{fm}\n{}", params.content)
+        } else {
+            params.content
+        };
+
+        match self
+            .core
+            .create(&path, FileContent::Markdown(content))
+            .await
+        {
+            Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
             Err(e) => tool_error(e),
         }
     }
 
     #[tool(
-        description = "Update an existing note. Requires revision token from a prior read for conflict detection."
+        description = "Update a note. In replace mode (default), overwrites content with revision check. In append mode, adds content to end without requiring a client-supplied revision (server tracks the revision internally)."
     )]
     async fn tarn_update_note(
         &self,
         Parameters(params): Parameters<UpdateNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let revision: RevisionToken = params.revision.into();
-        match self
-            .core
-            .write(&params.path, &params.content, Some(revision))
-            .await
-        {
-            Ok(new_revision) => {
-                let response = WriteNoteResponse {
-                    path: params.path,
-                    revision: new_revision,
-                };
-                tool_json(&response)
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+
+        match params.mode.as_deref() {
+            Some("append") => {
+                match self
+                    .core
+                    .append(&path, FileContent::Markdown(params.content))
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
             }
-            Err(e) => tool_error(e),
+            Some("replace") | None => {
+                let content = if let Some(fm_json) = params.frontmatter {
+                    let fm = match frontmatter_from_json(fm_json) {
+                        Ok(f) => f,
+                        Err(e) => return tool_error(format!("invalid frontmatter: {e}")),
+                    };
+                    format!("{fm}\n{}", params.content)
+                } else {
+                    params.content
+                };
+                match self.core.write(&path, FileContent::Markdown(content)).await {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some(other) => tool_error(format!(
+                "invalid mode: {other} (expected: replace or append)"
+            )),
         }
     }
 
@@ -179,51 +196,129 @@ where
         &self,
         Parameters(params): Parameters<ReplaceInNoteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let mode = match params.mode.as_deref() {
-            Some("all") => ReplaceMode::All,
-            Some("regex") => ReplaceMode::Regex,
-            Some("first") | None => ReplaceMode::First,
-            Some(other) => {
-                return tool_error(format!(
-                    "invalid mode: {other} (expected: first, all, or regex)"
-                ));
-            }
-        };
-
-        let revision: RevisionToken = params.revision.into();
-
-        // Read current content
-        let (note, _) = match self.core.read(&params.path).await {
-            Ok(result) => result,
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
             Err(e) => return tool_error(e),
         };
 
-        // Apply replacement
-        let current_content = note.to_string();
-        let new_content = match mode {
-            ReplaceMode::First => current_content.replacen(&params.old, &params.new, 1),
-            ReplaceMode::All => current_content.replace(&params.old, &params.new),
-            ReplaceMode::Regex => {
-                match RegexBuilder::new(&params.old).size_limit(1_000_000).build() {
-                    Ok(re) => re.replace_all(&current_content, &*params.new).into_owned(),
-                    Err(e) => return tool_error(format!("invalid regex: {e}")),
+        match params.mode.as_deref() {
+            Some("first") | None => {
+                // First-match: read, replacen, write back
+                let file = match self.core.read(&path).await {
+                    Ok(f) => f,
+                    Err(e) => return tool_error(e),
+                };
+                let current = match file.content {
+                    FileContent::Markdown(c) => c,
+                    _ => return tool_error("not a markdown file"),
+                };
+                let new_content = current.replacen(&params.old, &params.new, 1);
+                if new_content == current {
+                    return tool_error(format!("no match found for: {}", params.old));
+                }
+                match self
+                    .core
+                    .write(&path, FileContent::Markdown(new_content))
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
                 }
             }
+            Some("all") => {
+                match self
+                    .core
+                    .update(&path, &params.old, &params.new, UpdateMode::Text)
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some("regex") => {
+                match self
+                    .core
+                    .update(&path, &params.old, &params.new, UpdateMode::Regex)
+                    .await
+                {
+                    Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+                    Err(e) => tool_error(e),
+                }
+            }
+            Some(other) => tool_error(format!(
+                "invalid mode: {other} (expected: first, all, or regex)"
+            )),
+        }
+    }
+
+    #[tool(
+        description = "Modify note frontmatter. Removes keys first, then sets values. Tags are regular YAML values — use set/remove to modify them."
+    )]
+    async fn tarn_update_frontmatter(
+        &self,
+        Parameters(params): Parameters<UpdateFrontmatterParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
         };
 
-        // Write back with user's revision for conflict detection
-        match self
-            .core
-            .write(&params.path, &new_content, Some(revision))
-            .await
-        {
-            Ok(new_revision) => {
-                let response = WriteNoteResponse {
-                    path: params.path,
-                    revision: new_revision,
-                };
-                tool_json(&response)
+        let set = if let Some(json_map) = params.set {
+            match frontmatter_values_from_json(json_map) {
+                Ok(v) => v,
+                Err(e) => return tool_error(format!("invalid set values: {e}")),
             }
+        } else {
+            std::collections::HashMap::new()
+        };
+        let remove = params.remove.unwrap_or_default();
+
+        match self.core.update_frontmatter(&path, set, remove).await {
+            Ok(_) => tool_json(&WriteNoteResponse { path: params.path }),
+            Err(e) => tool_error(e),
+        }
+    }
+
+    #[tool(description = "Delete a note. Fails if the note does not exist.")]
+    async fn tarn_delete_note(
+        &self,
+        Parameters(params): Parameters<DeleteNoteParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+        match self.core.delete(&path).await {
+            Ok(()) => tool_json(&DeleteNoteResponse {
+                path: params.path,
+                deleted: true,
+            }),
+            Err(e) => tool_error(e),
+        }
+    }
+
+    #[tool(
+        description = "Rename or move a note. By default updates wikilinks in other notes that reference it."
+    )]
+    async fn tarn_rename_note(
+        &self,
+        Parameters(params): Parameters<RenameNoteParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let from = match VaultPath::new(&params.path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+        let to = match VaultPath::new(&params.new_path) {
+            Ok(p) => p,
+            Err(e) => return tool_error(e),
+        };
+
+        match self.core.rename(&from, &to, params.update_links).await {
+            Ok((_meta, links_updated)) => tool_json(&RenameNoteResponse {
+                old_path: params.path,
+                new_path: params.new_path,
+                links_updated,
+            }),
             Err(e) => tool_error(e),
         }
     }

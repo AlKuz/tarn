@@ -35,13 +35,16 @@ pub enum IndexBuildError {
     TagIndex(#[from] TagIndexError),
 }
 
-/// Compute the default persistence path for an index.
+/// Compute the default persistence folder for an index.
 ///
 /// Uses the platform-specific data directory (via `dirs::data_local_dir()`)
 /// with a hash of the vault path to distinguish multiple vaults:
-/// - Linux: `~/.local/share/tarn/<vault-hash>/index.json`
-/// - macOS: `~/Library/Application Support/tarn/<vault-hash>/index.json`
-/// - Windows: `C:\Users\<user>\AppData\Local\tarn\<vault-hash>\index.json`
+/// - Linux: `~/.local/share/tarn/<vault-hash>/`
+/// - macOS: `~/Library/Application Support/tarn/<vault-hash>/`
+/// - Windows: `C:\Users\<user>\AppData\Local\tarn\<vault-hash>\`
+///
+/// The folder contains per-component files: `meta.json`, `sections.json`,
+/// `bm25.json`, `tags.json`.
 ///
 /// Returns `None` if the platform data directory cannot be determined.
 pub fn default_persistence_path(vault_path: &std::path::Path) -> Option<PathBuf> {
@@ -52,7 +55,7 @@ pub fn default_persistence_path(vault_path: &std::path::Path) -> Option<PathBuf>
     let mut hasher = DefaultHasher::new();
     vault_path.hash(&mut hasher);
     let hash = format!("{:016x}", hasher.finish());
-    Some(data_dir.join("tarn").join(hash).join("index.json"))
+    Some(data_dir.join("tarn").join(hash))
 }
 
 impl Buildable for InMemoryIndexConfig {

@@ -258,25 +258,81 @@ mod events {
 // =============================================================================
 
 mod index_sync {
+    use std::sync::Arc;
+
     use super::*;
     use tarn::TarnConfig;
     use tarn::common::Buildable;
+    use tarn::observer::StorageEvent;
 
     const WATCHER_SETTLE_MS: u64 = 100;
     const SYNC_WAIT_MS: u64 = 500;
+
+    /// Spawn a background task that listens for changes and indexes them.
+    fn spawn_sync<S, I, O, R>(core: &Arc<tarn::TarnCore<S, I, O, R>>) -> tokio::task::JoinHandle<()>
+    where
+        S: tarn::storage::Storage + Send + Sync + 'static,
+        I: tarn::index::Index + Send + Sync + 'static,
+        O: tarn::observer::Observer + Send + Sync + 'static,
+        R: tarn::revisions::RevisionTracker + Send + Sync + 'static,
+    {
+        let core = core.clone();
+        tokio::spawn(async move {
+            let stream = core.listen_changes().await.unwrap();
+            tokio::pin!(stream);
+            while let Some(Ok(event)) = stream.next().await {
+                match event {
+                    StorageEvent::Created { path, .. } | StorageEvent::Updated { path, .. } => {
+                        if let Ok(file) = core.read(&path).await {
+                            let _ = core.update_index(&file).await;
+                        }
+                    }
+                    StorageEvent::Deleted { path } => {
+                        let _ = core.delete_index(&path).await;
+                    }
+                }
+            }
+        })
+    }
+
+    /// Index all files via review_changes.
+    async fn index_all<S, I, O, R>(core: &tarn::TarnCore<S, I, O, R>)
+    where
+        S: tarn::storage::Storage + Send + Sync + 'static,
+        I: tarn::index::Index + Send + Sync + 'static,
+        O: tarn::observer::Observer + Send + Sync + 'static,
+        R: tarn::revisions::RevisionTracker + Send + Sync + 'static,
+    {
+        let stream = core.review_changes().await.unwrap();
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StorageEvent::Created { path, .. } | StorageEvent::Updated { path, .. } => {
+                    if let Ok(file) = core.read(&path).await {
+                        let _ = core.update_index(&file).await;
+                    }
+                }
+                StorageEvent::Deleted { path } => {
+                    let _ = core.delete_index(&path).await;
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn sync_indexes_new_file() {
         let dir = TempDir::new().unwrap();
 
-        let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory(
-                tarn::index::InMemoryIndexConfig::default(),
-            ))
-            .build()
-            .unwrap();
+        let core = Arc::new(
+            TarnConfig::local(dir.path().to_path_buf())
+                .with_index(tarn::index::IndexConfig::InMemory(
+                    tarn::index::InMemoryIndexConfig::default(),
+                ))
+                .build()
+                .unwrap(),
+        );
 
-        let _handle = core.start_index_sync();
+        let _handle = spawn_sync(&core);
 
         // Give watcher time to initialize
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
@@ -313,14 +369,16 @@ mod index_sync {
         .await
         .unwrap();
 
-        let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory(
-                tarn::index::InMemoryIndexConfig::default(),
-            ))
-            .build()
-            .unwrap();
+        let core = Arc::new(
+            TarnConfig::local(dir.path().to_path_buf())
+                .with_index(tarn::index::IndexConfig::InMemory(
+                    tarn::index::InMemoryIndexConfig::default(),
+                ))
+                .build()
+                .unwrap(),
+        );
 
-        core.rebuild_index().await.unwrap();
+        index_all(&core).await;
 
         // Verify initial content is indexed
         let results = core
@@ -329,7 +387,7 @@ mod index_sync {
             .unwrap();
         assert_eq!(results.len(), 1);
 
-        let _handle = core.start_index_sync();
+        let _handle = spawn_sync(&core);
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Modify the file with different content
@@ -368,14 +426,16 @@ mod index_sync {
         .await
         .unwrap();
 
-        let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory(
-                tarn::index::InMemoryIndexConfig::default(),
-            ))
-            .build()
-            .unwrap();
+        let core = Arc::new(
+            TarnConfig::local(dir.path().to_path_buf())
+                .with_index(tarn::index::IndexConfig::InMemory(
+                    tarn::index::InMemoryIndexConfig::default(),
+                ))
+                .build()
+                .unwrap(),
+        );
 
-        core.rebuild_index().await.unwrap();
+        index_all(&core).await;
 
         // Verify file is indexed
         let results = core
@@ -384,7 +444,7 @@ mod index_sync {
             .unwrap();
         assert_eq!(results.len(), 1);
 
-        let _handle = core.start_index_sync();
+        let _handle = spawn_sync(&core);
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Delete the file
@@ -406,14 +466,16 @@ mod index_sync {
     async fn sync_ignores_non_markdown_files() {
         let dir = TempDir::new().unwrap();
 
-        let core = TarnConfig::local(dir.path().to_path_buf())
-            .with_index(tarn::index::IndexConfig::InMemory(
-                tarn::index::InMemoryIndexConfig::default(),
-            ))
-            .build()
-            .unwrap();
+        let core = Arc::new(
+            TarnConfig::local(dir.path().to_path_buf())
+                .with_index(tarn::index::IndexConfig::InMemory(
+                    tarn::index::InMemoryIndexConfig::default(),
+                ))
+                .build()
+                .unwrap(),
+        );
 
-        let _handle = core.start_index_sync();
+        let _handle = spawn_sync(&core);
         tokio::time::sleep(Duration::from_millis(WATCHER_SETTLE_MS)).await;
 
         // Create non-markdown files
@@ -425,7 +487,10 @@ mod index_sync {
         tokio::time::sleep(Duration::from_millis(SYNC_WAIT_MS)).await;
 
         // Verify no notes indexed
-        let paths = core.list(None, true).await.unwrap();
+        let paths = core
+            .list_paths(&tarn::common::VaultPath::Root)
+            .await
+            .unwrap();
         assert_eq!(paths.len(), 0);
     }
 }

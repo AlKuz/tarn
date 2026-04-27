@@ -127,13 +127,12 @@ impl RenderNote<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{RevisionToken, VaultPath};
+    use crate::common::VaultPath;
     use crate::index::{NoteResult, SectionResult};
 
     fn make_note_result(path: &str, sections: Vec<SectionResult>) -> NoteResult {
         NoteResult {
             path: VaultPath::new(path).unwrap(),
-            revision: RevisionToken::from("rev"),
             sections,
         }
     }

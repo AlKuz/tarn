@@ -83,7 +83,7 @@ pub trait Storage: Send + Sync {
         path: &VaultPath,
         data: FileContent,
         expected_token: Option<RevisionToken>,
-    ) -> impl Future<Output = Result<RevisionToken, StorageError>> + Send;
+    ) -> impl Future<Output = Result<FileMeta, StorageError>> + Send;
     fn delete(
         &self,
         path: &VaultPath,
@@ -94,12 +94,12 @@ pub trait Storage: Send + Sync {
         from: &VaultPath,
         to: &VaultPath,
         expected_token: RevisionToken,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    ) -> impl Future<Output = Result<FileMeta, StorageError>> + Send;
     fn copy(
         &self,
         from: &VaultPath,
         to: &VaultPath,
-    ) -> impl Future<Output = Result<RevisionToken, StorageError>> + Send;
+    ) -> impl Future<Output = Result<FileMeta, StorageError>> + Send;
     fn exists(&self, path: &VaultPath) -> impl Future<Output = Result<bool, StorageError>> + Send;
     fn deny_access(&self, paths: &[VaultPath]);
     fn read_only_access(&self, paths: &[VaultPath]);

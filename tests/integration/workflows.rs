@@ -93,7 +93,7 @@ async fn write_workflow() {
         }),
     )
     .await;
-    let revision = created["revision"].as_str().unwrap().to_string();
+    assert_eq!(created["path"], "projects/new-feature.md");
 
     // Step 2: Read it back via resource
     let note = read_resource(&server.client, "tarn://note/projects/new-feature.md").await;
@@ -105,19 +105,16 @@ async fn write_workflow() {
             .contains(&Value::String("project".to_string()))
     );
 
-    // Step 3: Update with revision
-    let updated = call_tool(
+    // Step 3: Update — server tracks revisions
+    call_tool(
         &server.client,
         "tarn_update_note",
         json!({
             "path": "projects/new-feature.md",
-            "content": "---\ntags:\n  - project\n  - active\n---\n# New Feature\n\n## Status\n\nCompleted.\n\n## Tasks\n\n- [x] Design\n- [x] Implement",
-            "revision": revision
+            "content": "---\ntags:\n  - project\n  - active\n---\n# New Feature\n\n## Status\n\nCompleted.\n\n## Tasks\n\n- [x] Design\n- [x] Implement"
         }),
     )
     .await;
-    let new_revision = updated["revision"].as_str().unwrap();
-    assert_ne!(new_revision, revision);
 
     // Step 4: Verify via resource
     let final_note = read_resource(&server.client, "tarn://note/projects/new-feature.md").await;
@@ -128,14 +125,13 @@ async fn write_workflow() {
             .contains("Completed")
     );
 
-    // Step 5: Verify the updated note has correct tags and content via resource
+    // Step 5: Verify the updated note has correct tags
     assert!(
         final_note["tags"]
             .as_array()
             .unwrap()
             .contains(&Value::String("active".to_string()))
     );
-    assert_eq!(final_note["revision"].as_str().unwrap(), new_revision);
 }
 
 /// Full research session combining resources, tools, and tag navigation.
@@ -163,7 +159,7 @@ async fn full_research_session() {
     let tags = call_tool(
         &server.client,
         "tarn_get_tags",
-        json!({"prefix": "programming/web", "include_notes": true}),
+        json!({"prefix": "programming/web"}),
     )
     .await;
     let web_tag = tags["tags"]

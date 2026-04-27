@@ -1,12 +1,15 @@
 //! Tag-based inverted index with trigram similarity scoring.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::common::{Buildable, Configurable, VaultPath};
+use crate::common::{Buildable, Configurable, Persistable, VaultPath};
 use crate::tokenizer::{NgramTokenizer, TokenizerError};
+
+use super::InMemoryIndexError;
 
 /// Errors from tag index construction.
 #[derive(Debug, Error)]
@@ -20,6 +23,18 @@ use super::scorer::Scorer;
 /// Default n-gram size for tag trigrams.
 const DEFAULT_N: usize = 3;
 const DEFAULT_THRESHOLD: f32 = 0.0;
+
+/// Persistence version for tag index files.
+const TAGS_PERSIST_VERSION: u32 = 1;
+
+/// Persistence format for tag index.
+#[derive(Serialize, Deserialize)]
+struct TagsFile {
+    version: u32,
+    index: HashMap<String, HashSet<VaultPath>>,
+    reverse: HashMap<VaultPath, HashSet<String>>,
+    section_trigrams: HashMap<VaultPath, HashSet<String>>,
+}
 
 /// Configuration for the tag index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,6 +208,16 @@ impl TagIndex {
     pub fn tags_for_section(&self, section_path: &VaultPath) -> Option<&HashSet<String>> {
         self.reverse.get(section_path)
     }
+    /// Serialize the index state to JSON bytes without writing to disk.
+    pub(super) fn to_bytes(&self) -> Result<Vec<u8>, InMemoryIndexError> {
+        let file = TagsFile {
+            version: TAGS_PERSIST_VERSION,
+            index: self.index.clone(),
+            reverse: self.reverse.clone(),
+            section_trigrams: self.section_trigrams.clone(),
+        };
+        Ok(serde_json::to_vec(&file)?)
+    }
 }
 
 impl Scorer for TagIndex {
@@ -251,6 +276,31 @@ impl Configurable for TagIndex {
             n,
             threshold: self.threshold,
         }
+    }
+}
+
+impl Persistable for TagIndex {
+    type Error = InMemoryIndexError;
+
+    fn save(&self, path: &Path) -> Result<(), Self::Error> {
+        let bytes = self.to_bytes()?;
+        std::fs::write(path, &bytes)?;
+        Ok(())
+    }
+
+    fn load(&mut self, path: &Path) -> Result<bool, Self::Error> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let bytes = std::fs::read(path)?;
+        let file: TagsFile = serde_json::from_slice(&bytes)?;
+        if file.version != TAGS_PERSIST_VERSION {
+            return Ok(false);
+        }
+        self.index = file.index;
+        self.reverse = file.reverse;
+        self.section_trigrams = file.section_trigrams;
+        Ok(true)
     }
 }
 
@@ -545,5 +595,62 @@ mod tests {
 
         index.remove(&s1);
         assert!(!index.section_trigrams.contains_key(&s1));
+    }
+
+    // --- Persistence tests ---
+
+    #[test]
+    fn save_load_roundtrip() {
+        let mut index = make_index();
+
+        let s1 = section_path("note1.md", &[]);
+        let s2 = section_path("note2.md", &[]);
+        index.add(s1.clone(), &["rust".into(), "programming".into()]);
+        index.add(s2.clone(), &["python".into()]);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("tags.json");
+        index.save(&path).unwrap();
+
+        // Create a fresh index and load
+        let mut restored = make_index();
+        assert!(restored.load(&path).unwrap());
+
+        // Verify filtering works
+        let rust_tags: HashSet<String> = ["rust".into()].into();
+        let result = restored.filter(Some(&rust_tags), None);
+        assert!(result.contains(&s1));
+        assert!(!result.contains(&s2));
+
+        // Verify scoring works (trigrams restored, not rebuilt)
+        let candidates: HashSet<VaultPath> = [s1.clone(), s2.clone()].into();
+        let results = restored.score("rust", &candidates);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, s1);
+    }
+
+    #[test]
+    fn load_missing_file_returns_false() {
+        let mut index = make_index();
+        let result = index.load(Path::new("/nonexistent/tags.json")).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn load_version_mismatch_returns_false() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("tags.json");
+
+        let file = TagsFile {
+            version: 999,
+            index: HashMap::new(),
+            reverse: HashMap::new(),
+            section_trigrams: HashMap::new(),
+        };
+        let bytes = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut index = make_index();
+        assert!(!index.load(&path).unwrap());
     }
 }

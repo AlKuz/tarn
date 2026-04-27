@@ -183,7 +183,6 @@ async fn note_resource_reads_content() {
     assert_eq!(note["title"], "Rust");
     assert!(note["token_count"].as_u64().unwrap() > 0);
     assert!(!note["content"].as_str().unwrap().is_empty());
-    assert!(!note["revision"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -272,7 +271,6 @@ async fn section_resource_reads_content() {
             .contains("Every value has exactly one owner")
     );
     assert!(section["token_count"].as_u64().unwrap() > 0);
-    assert!(!section["revision"].as_str().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

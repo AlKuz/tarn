@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use super::TarnMcpServer;
 use crate::index::Index;
 use crate::observer::Observer;
+use crate::revisions::RevisionTracker;
 use crate::storage::Storage;
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
@@ -25,11 +26,12 @@ pub struct SummarizeProjectArgs {
 }
 
 #[prompt_router(vis = "pub(crate)")]
-impl<S, I, O> TarnMcpServer<S, I, O>
+impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     #[prompt(
         name = "tarn_explore_topic",

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::common::VaultPath;
 
@@ -9,13 +9,4 @@ pub struct TagEntry {
     pub count: usize,
     pub children: Vec<String>,
     pub note_paths: Vec<VaultPath>,
-}
-
-/// Replacement mode for text replacement operations.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReplaceMode {
-    First,
-    All,
-    Regex,
 }

@@ -10,6 +10,9 @@ use crate::index::{
     InMemoryIndexConfig, Index, IndexBuildError, IndexConfig, default_persistence_path,
 };
 use crate::observer::{Observer, ObserverConfig};
+use crate::revisions::{
+    InMemoryRevisionTrackerConfig, RevisionTracker, RevisionTrackerConfig, RevisionTrackerError,
+};
 use crate::storage::{LocalStorageConfig, Storage, StorageConfig};
 
 use super::tarn_core::TarnCore;
@@ -32,6 +35,8 @@ pub enum BuildError {
     Index(#[from] IndexBuildError),
     #[error("storage initialization failed: {0}")]
     Storage(#[from] std::io::Error),
+    #[error("revision tracker initialization failed: {0}")]
+    Revisions(#[from] RevisionTrackerError),
 }
 
 impl From<InMemoryIndexError> for BuildError {
@@ -51,11 +56,17 @@ impl From<std::convert::Infallible> for BuildError {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TarnConfig<SC = StorageConfig, IC = IndexConfig, OC = ObserverConfig> {
+pub struct TarnConfig<
+    SC = StorageConfig,
+    IC = IndexConfig,
+    OC = ObserverConfig,
+    RC = RevisionTrackerConfig,
+> {
     pub vault_name: String,
     pub storage: SC,
     pub index: IC,
     pub observer: OC,
+    pub revisions: RC,
 }
 
 impl TarnConfig {
@@ -71,10 +82,13 @@ impl TarnConfig {
             vault_name,
             storage: StorageConfig::Local(LocalStorageConfig { path }),
             index: IndexConfig::InMemory(InMemoryIndexConfig {
-                persistence_path,
+                persistence_path: persistence_path.clone(),
                 ..Default::default()
             }),
             observer,
+            revisions: RevisionTrackerConfig::InMemory(InMemoryRevisionTrackerConfig {
+                persistence_path,
+            }),
         }
     }
 
@@ -94,10 +108,13 @@ impl TarnConfig {
             vault_name,
             storage,
             index: IndexConfig::InMemory(InMemoryIndexConfig {
-                persistence_path,
+                persistence_path: persistence_path.clone(),
                 ..Default::default()
             }),
             observer,
+            revisions: RevisionTrackerConfig::InMemory(InMemoryRevisionTrackerConfig {
+                persistence_path,
+            }),
         })
     }
 
@@ -132,29 +149,33 @@ impl TarnConfig {
     }
 }
 
-impl<SC, IC, OC> Buildable for TarnConfig<SC, IC, OC>
+impl<SC, IC, OC, RC> Buildable for TarnConfig<SC, IC, OC, RC>
 where
     SC: Buildable + Serialize + for<'de> Deserialize<'de>,
     IC: Buildable + Serialize + for<'de> Deserialize<'de>,
     OC: Buildable + Serialize + for<'de> Deserialize<'de>,
+    RC: Buildable + Serialize + for<'de> Deserialize<'de>,
     SC::Target: Storage + Send + Sync + 'static,
     IC::Target: Index + Send + Sync + 'static,
     OC::Target: Observer + Send + Sync + 'static,
-    BuildError: From<SC::Error> + From<IC::Error> + From<OC::Error>,
+    RC::Target: RevisionTracker + Send + Sync + 'static,
+    BuildError: From<SC::Error> + From<IC::Error> + From<OC::Error> + From<RC::Error>,
 {
-    type Target = TarnCore<SC::Target, IC::Target, OC::Target>;
+    type Target = TarnCore<SC::Target, IC::Target, OC::Target, RC::Target>;
     type Error = BuildError;
 
     fn build(&self) -> Result<Self::Target, Self::Error> {
         let storage = Arc::new(self.storage.build()?);
         let index = Arc::new(self.index.build()?);
         let observer = Arc::new(self.observer.build()?);
+        let revisions = Arc::new(self.revisions.build()?);
 
         Ok(TarnCore::new(
             storage,
             self.vault_name.clone(),
             index,
             observer,
+            revisions,
         ))
     }
 }
@@ -238,5 +259,13 @@ mod tests {
         let index_err = InMemoryIndexError::Io(io_err);
         let build_err: BuildError = index_err.into();
         assert!(matches!(build_err, BuildError::Index(_)));
+    }
+
+    #[test]
+    fn build_error_from_revision_tracker_error() {
+        let io_err = std::io::Error::other("test");
+        let rev_err = RevisionTrackerError::Io(io_err);
+        let build_err: BuildError = rev_err.into();
+        assert!(matches!(build_err, BuildError::Revisions(_)));
     }
 }

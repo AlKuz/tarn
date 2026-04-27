@@ -9,9 +9,12 @@
 //!
 //! - `tarn_search_notes` - Full-text search with BM25 ranking (if index configured)
 //! - `tarn_get_tags` - Get tag hierarchy with usage statistics
-//! - `tarn_create_note` - Create a new note (fails if already exists)
-//! - `tarn_update_note` - Update an existing note with revision-based conflict detection
+//! - `tarn_create_note` - Create a new note with optional frontmatter
+//! - `tarn_update_note` - Replace or append note content with revision-based conflict detection
 //! - `tarn_replace_in_note` - Replace text within a note (first, all, or regex modes)
+//! - `tarn_update_frontmatter` - Modify frontmatter keys without rewriting content
+//! - `tarn_delete_note` - Delete a note with conflict detection
+//! - `tarn_rename_note` - Rename/move a note with vault-wide link updates
 //!
 //! ## Resources
 //!
@@ -47,6 +50,7 @@
 pub mod helpers;
 mod prompts;
 mod resources;
+pub mod sync;
 mod tools;
 pub mod types;
 
@@ -61,9 +65,11 @@ use rmcp::{
     tool_handler,
 };
 
+use self::types::{McpResult, mcp_not_found};
 use crate::core::tarn_core::TarnCore;
 use crate::index::Index;
 use crate::observer::Observer;
+use crate::revisions::RevisionTracker;
 use crate::storage::Storage;
 
 /// MCP server exposing Tarn vault operations.
@@ -72,27 +78,29 @@ use crate::storage::Storage;
 /// and prompts for AI agent integration. The server is clone-cheap (uses `Arc`
 /// internally) and can be shared across multiple transport connections.
 #[derive(Clone)]
-pub struct TarnMcpServer<S, I, O>
+pub struct TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
-    core: Arc<TarnCore<S, I, O>>,
+    core: Arc<TarnCore<S, I, O, R>>,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
 }
 
-impl<S, I, O> TarnMcpServer<S, I, O>
+impl<S, I, O, R> TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     /// Create a new MCP server wrapping the given core.
     ///
     /// The core should be fully initialized (index rebuilt if using indexing).
-    pub fn new(core: Arc<TarnCore<S, I, O>>) -> Self {
+    pub fn new(core: Arc<TarnCore<S, I, O, R>>) -> Self {
         let tool_router = Self::tool_router();
         let prompt_router = Self::prompt_router();
         Self {
@@ -105,11 +113,12 @@ where
 
 #[tool_handler]
 #[prompt_handler]
-impl<S, I, O> ServerHandler for TarnMcpServer<S, I, O>
+impl<S, I, O, R> ServerHandler for TarnMcpServer<S, I, O, R>
 where
     S: Storage + Send + Sync + 'static,
     I: Index + Send + Sync + 'static,
     O: Observer + Send + Sync + 'static,
+    R: RevisionTracker + Send + Sync + 'static,
 {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -132,23 +141,90 @@ where
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
-        Ok(self.list_static_resources())
+    ) -> McpResult<ListResourcesResult> {
+        Ok(ListResourcesResult {
+            resources: vec![
+                RawResource::new("tarn://vault/info", "Vault Info")
+                    .with_description("Vault metadata: name, note count, tag count, storage type")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+                RawResource::new("tarn://vault/tags", "Vault Tags")
+                    .with_description("Tag hierarchy with counts across the vault")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+                RawResource::new("tarn://vault/folders", "Vault Folders")
+                    .with_description("Directory tree structure with note counts")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+            ],
+            next_cursor: None,
+            meta: None,
+        })
     }
 
     async fn list_resource_templates(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
-        Ok(self.list_resource_templates_static())
+    ) -> McpResult<ListResourceTemplatesResult> {
+        Ok(ListResourceTemplatesResult {
+            resource_templates: vec![
+                RawResourceTemplate::new("tarn://vault/info/{folder}", "Vault Info (folder)")
+                    .with_description("Vault metadata scoped to a folder subtree")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+                RawResourceTemplate::new("tarn://vault/tags/{folder}", "Vault Tags (folder)")
+                    .with_description("Tag hierarchy scoped to a folder subtree")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+                RawResourceTemplate::new("tarn://vault/folders/{folder}", "Vault Folders (folder)")
+                    .with_description("Directory tree scoped to a folder subtree")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+                RawResourceTemplate::new("tarn://note/{path}", "Note")
+                    .with_description("Individual note content and metadata")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+                RawResourceTemplate::new("tarn://note/{path}#{section_path}", "Note Section")
+                    .with_description("Section content by heading path (e.g. Architecture/Backend)")
+                    .with_mime_type("application/json")
+                    .no_annotation(),
+            ],
+            next_cursor: None,
+            meta: None,
+        })
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
-        self.read_resource_by_uri(&request.uri).await
+    ) -> McpResult<ReadResourceResult> {
+        let uri = &request.uri;
+
+        let rest = uri
+            .strip_prefix("tarn://")
+            .ok_or_else(|| mcp_not_found(format!("unknown resource: {uri}")))?;
+
+        let segments: Vec<&str> = rest.splitn(3, '/').collect();
+
+        match segments.as_slice() {
+            ["vault", "info"] => self.read_vault_info(uri, None).await,
+            ["vault", "info", folder] => self.read_vault_info(uri, Some(folder)).await,
+            ["vault", "tags"] => self.read_vault_tags(uri, None).await,
+            ["vault", "tags", folder] => self.read_vault_tags(uri, Some(folder)).await,
+            ["vault", "folders"] => self.read_vault_folders(uri, None).await,
+            ["vault", "folders", folder] => self.read_vault_folders(uri, Some(folder)).await,
+            ["note", rest @ ..] => {
+                let path = rest.join("/");
+                if let Some((note_path, section_path)) = path.split_once('#') {
+                    self.read_section_resource(uri, note_path, section_path)
+                        .await
+                } else {
+                    self.read_note_resource(uri, &path).await
+                }
+            }
+            _ => Err(mcp_not_found(format!("unknown resource: {uri}"))),
+        }
     }
 }

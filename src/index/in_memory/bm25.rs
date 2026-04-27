@@ -1,13 +1,15 @@
 //! BM25 full-text search index with internal stemming tokenizer.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Buildable, Configurable, VaultPath};
+use crate::common::{Buildable, Configurable, Persistable, VaultPath};
 use crate::tokenizer::StemmingTokenizer;
 use crate::tokenizer::Tokenizer;
 
+use super::InMemoryIndexError;
 use super::scorer::Scorer;
 
 /// Default BM25 algorithm parameters.
@@ -64,19 +66,22 @@ impl Buildable for BM25Config {
     }
 }
 
-/// Serializable snapshot of BM25 index state for persistence.
-///
-/// The inverted index is rebuilt from `documents` on restore.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BM25Snapshot {
-    pub documents: HashMap<VaultPath, DocumentData>,
-    pub doc_count: usize,
-    pub total_doc_length: u64,
+/// Persistence version for BM25 index files.
+const BM25_PERSIST_VERSION: u32 = 1;
+
+/// Persistence format for BM25 index.
+#[derive(Serialize, Deserialize)]
+struct BM25File {
+    version: u32,
+    inverted: HashMap<String, Vec<(VaultPath, u32)>>,
+    documents: HashMap<VaultPath, DocumentData>,
+    doc_count: usize,
+    total_doc_length: u64,
 }
 
 /// Document data stored for BM25 scoring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentData {
+pub(crate) struct DocumentData {
     /// Term frequencies: term -> count
     pub term_freqs: HashMap<String, u32>,
     /// Document length (token count)
@@ -210,35 +215,6 @@ impl BM25Index {
         results
     }
 
-    /// Create a snapshot of the index state for persistence.
-    pub fn snapshot(&self) -> BM25Snapshot {
-        BM25Snapshot {
-            documents: self.documents.clone(),
-            doc_count: self.doc_count,
-            total_doc_length: self.total_doc_length,
-        }
-    }
-
-    /// Restore index state from a persisted snapshot.
-    ///
-    /// Rebuilds the inverted index from document term frequencies.
-    pub fn restore(&mut self, snapshot: BM25Snapshot) {
-        self.documents = snapshot.documents;
-        self.doc_count = snapshot.doc_count;
-        self.total_doc_length = snapshot.total_doc_length;
-
-        // Rebuild inverted index from documents
-        self.inverted.clear();
-        for (section_path, doc_data) in &self.documents {
-            for (term, freq) in &doc_data.term_freqs {
-                self.inverted
-                    .entry(term.clone())
-                    .or_default()
-                    .push((section_path.clone(), *freq));
-            }
-        }
-    }
-
     /// Clear all indexed data.
     pub fn clear(&mut self) {
         self.inverted.clear();
@@ -255,6 +231,17 @@ impl BM25Index {
     /// Get the document length (token count) for a section.
     pub fn doc_length(&self, section_path: &VaultPath) -> Option<u32> {
         self.documents.get(section_path).map(|d| d.doc_length)
+    }
+    /// Serialize the index state to JSON bytes without writing to disk.
+    pub(super) fn to_bytes(&self) -> Result<Vec<u8>, InMemoryIndexError> {
+        let file = BM25File {
+            version: BM25_PERSIST_VERSION,
+            inverted: self.inverted.clone(),
+            documents: self.documents.clone(),
+            doc_count: self.doc_count,
+            total_doc_length: self.total_doc_length,
+        };
+        Ok(serde_json::to_vec(&file)?)
     }
 }
 
@@ -277,6 +264,32 @@ impl Configurable for BM25Index {
             b: self.b,
             threshold: self.threshold,
         }
+    }
+}
+
+impl Persistable for BM25Index {
+    type Error = InMemoryIndexError;
+
+    fn save(&self, path: &Path) -> Result<(), Self::Error> {
+        let bytes = self.to_bytes()?;
+        std::fs::write(path, &bytes)?;
+        Ok(())
+    }
+
+    fn load(&mut self, path: &Path) -> Result<bool, Self::Error> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let bytes = std::fs::read(path)?;
+        let file: BM25File = serde_json::from_slice(&bytes)?;
+        if file.version != BM25_PERSIST_VERSION {
+            return Ok(false);
+        }
+        self.inverted = file.inverted;
+        self.documents = file.documents;
+        self.doc_count = file.doc_count;
+        self.total_doc_length = file.total_doc_length;
+        Ok(true)
     }
 }
 
@@ -437,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_restore_roundtrip() {
+    fn save_load_roundtrip() {
         let mut index = make_index();
 
         let s1 = section_path("note1.md", &["Intro"]);
@@ -445,11 +458,13 @@ mod tests {
         index.add_document(s1.clone(), "Rust programming language");
         index.add_document(s2.clone(), "Python web framework");
 
-        let snapshot = index.snapshot();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("bm25.json");
+        index.save(&path).unwrap();
 
-        // Create a fresh index and restore
+        // Create a fresh index and load
         let mut restored = make_index();
-        restored.restore(snapshot);
+        assert!(restored.load(&path).unwrap());
 
         // Verify search works on restored index
         let all: HashSet<VaultPath> = [s1.clone(), s2.clone()].into();
@@ -459,6 +474,33 @@ mod tests {
 
         assert!(restored.contains(&s1));
         assert!(restored.contains(&s2));
+    }
+
+    #[test]
+    fn load_missing_file_returns_false() {
+        let mut index = make_index();
+        let result = index.load(Path::new("/nonexistent/bm25.json")).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn load_version_mismatch_returns_false() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("bm25.json");
+
+        // Write a file with wrong version
+        let file = BM25File {
+            version: 999,
+            inverted: HashMap::new(),
+            documents: HashMap::new(),
+            doc_count: 0,
+            total_doc_length: 0,
+        };
+        let bytes = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut index = make_index();
+        assert!(!index.load(&path).unwrap());
     }
 
     #[test]
