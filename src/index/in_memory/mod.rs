@@ -108,6 +108,8 @@ fn load_sections(
 
 /// Write `bytes` to `dir/filename` atomically via a temp file + rename.
 ///
+/// Each call uses a unique temp file name (via an atomic counter) so that
+/// concurrent `persist()` calls never collide on the same `.tmp` file.
 /// On rename failure, attempts to clean up the temporary file to avoid
 /// leaving orphaned `.tmp` files on disk.
 async fn atomic_write(
@@ -115,7 +117,10 @@ async fn atomic_write(
     filename: &str,
     bytes: &[u8],
 ) -> Result<(), InMemoryIndexError> {
-    let tmp_path = dir.join(format!("{filename}.tmp"));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(".{filename}.{id}.tmp"));
     let final_path = dir.join(filename);
     tokio::fs::write(&tmp_path, bytes).await?;
     if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {

@@ -81,8 +81,11 @@ impl InMemoryRevisionTracker {
         };
         drop(guard);
 
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let file_path = dir.join(REVISIONS_FILE);
-        let tmp_path = dir.join(format!("{}.tmp", REVISIONS_FILE));
+        let tmp_path = dir.join(format!(".{}.{id}.tmp", REVISIONS_FILE));
         if let Err(e) = tokio::fs::write(&tmp_path, &bytes).await {
             tracing::warn!(path = %tmp_path.display(), error = %e, "failed to write revisions tmp file");
             return;
