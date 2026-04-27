@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/AlKuz/tarn/compare/v0.8.0...v0.9.0) (2026-04-27)
+
+
+### Features
+
+* server tracked revisions ([#37](https://github.com/AlKuz/tarn/issues/37)) ([62f61a1](https://github.com/AlKuz/tarn/commit/62f61a1ec1088571ced655155b7ef098f1a65224))
+
 ## [0.8.0](https://github.com/AlKuz/tarn/compare/v0.7.0...v0.8.0) (2026-04-09)
 
 
