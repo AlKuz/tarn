@@ -12,13 +12,30 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_created: ${{ steps.detect_tag.outputs.release_created }}
+      tag_name: ${{ steps.detect_tag.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           release-type: rust
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Detect tag directly from git instead of relying on release-please-action's
+      # `release_created` output, which has been observed to flicker to falsy on
+      # runs that *do* create the release (single-package mode in v4).
+      - id: detect_tag
+        run: |
+          git fetch --tags --force
+          TAG=$(git tag --points-at HEAD --list 'v*' | head -n1)
+          if [ -n "$TAG" ]; then
+            echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+            echo "release_created=true" >> "$GITHUB_OUTPUT"
+          fi
 
   build-artifacts:
     needs: release-please
