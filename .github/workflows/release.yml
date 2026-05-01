@@ -6,6 +6,12 @@ on:
       tag_name:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag to build artifacts for (e.g. v0.9.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -40,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -83,6 +91,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
