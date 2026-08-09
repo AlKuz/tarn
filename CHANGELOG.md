@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/AlKuz/tarn/compare/v0.9.0...v0.9.1) (2026-05-01)
+
+
+### Bug Fixes
+
+* ci ([#39](https://github.com/AlKuz/tarn/issues/39)) ([5282e3c](https://github.com/AlKuz/tarn/commit/5282e3c4397a642f883576785e6079d81ddd8096))
+
 ## [0.9.0](https://github.com/AlKuz/tarn/compare/v0.8.0...v0.9.0) (2026-04-27)
 
 
