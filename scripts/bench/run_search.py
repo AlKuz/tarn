@@ -111,6 +111,27 @@ def main() -> None:
         ),
     )
     ap.add_argument(
+        "--token-limit",
+        type=int,
+        default=None,
+        help=(
+            "prefix cut over cumulative section token_count, applied after "
+            "--top-k. Off by default; set it to measure what a context budget "
+            "costs in recall."
+        ),
+    )
+    ap.add_argument(
+        "--score-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "minimum fused score. Compared against the reciprocal-rank score, "
+            "where two ranking pipelines cap at ~0.0328 -- despite the tool "
+            "describing it as a 0.0-1.0 scale. Any 'sensible' value returns "
+            "nothing, so the default is 0.0."
+        ),
+    )
+    ap.add_argument(
         "--features",
         default="stemming",
         help="cargo features the binary was built with",
@@ -154,14 +175,14 @@ def main() -> None:
     # warm start reloading four JSON files.
     cold_start = not any(state.iterdir())
 
+    # These four are the configuration: report.py groups runs by them, so two runs
+    # of the same version with different values become a comparison rather than
+    # two unrelated numbers. `rendered` is fixed: rendered=true returns Markdown
+    # text instead of structured results, which carries no note paths to score.
     params = {
         "limit": args.top_k,
-        "token_limit": None,
-        # Left at tarn's default. The parameter is compared against the fused RRF
-        # score, where two pipelines cap at ~0.0328 -- despite the tool
-        # description claiming a 0.0-1.0 scale. Any "sensible" threshold returns
-        # nothing at all.
-        "score_threshold": 0.0,
+        "token_limit": args.token_limit,
+        "score_threshold": args.score_threshold,
         "rendered": False,
     }
 
@@ -222,9 +243,14 @@ def main() -> None:
         with run_path.open("w") as out:
             for i, q in enumerate(queries, 1):
                 t = time.perf_counter()
-                result = client.call_tool(
-                    tool, {"query": q["text"], "limit": args.top_k}
-                )
+                arguments: Json = {
+                    "query": q["text"],
+                    "limit": args.top_k,
+                    "score_threshold": args.score_threshold,
+                }
+                if args.token_limit is not None:
+                    arguments["token_limit"] = args.token_limit
+                result = client.call_tool(tool, arguments)
                 latency_ms = (time.perf_counter() - t) * 1000
                 hits = extract_hits(result)
                 if len(hits) < args.top_k:

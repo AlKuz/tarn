@@ -14,7 +14,10 @@ just its name.
 Usage:
     python scripts/bench/download_beir.py scifact
     python scripts/bench/download_beir.py nfcorpus arguana scidocs   # several at once
+    python scripts/bench/download_beir.py all                        # the whole catalogue
+    python scripts/bench/download_beir.py tier-a                     # one tier
     python scripts/bench/download_beir.py --list                     # show the catalogue
+    python scripts/bench/download_beir.py --resolve tier-a           # names only, for scripting
 """
 
 import argparse
@@ -61,13 +64,48 @@ def tier_of(name: str) -> str:
     return entry[0] if entry else "?"
 
 
+def resolve(selectors: list[str]) -> list[str]:
+    """Expand selectors into dataset names, in order, without duplicates.
+
+    A selector is `all`, `tier-a`/`tier-b`/`tier-c`, or a dataset name. Keeping
+    this here rather than in the Makefile means the catalogue stays the single
+    source of truth -- a name added to CATALOGUE is immediately selectable.
+
+    An unknown name is passed through with a warning rather than rejected, for
+    the same reason download_one does: BEIR hosts more datasets than these.
+    """
+    names: list[str] = []
+    for selector in selectors:
+        key = selector.lower()
+        if key == "all":
+            names.extend(CATALOGUE)
+        elif key.startswith("tier-"):
+            tier = key.removeprefix("tier-").upper()
+            matched = [n for n, (t, _, _) in CATALOGUE.items() if t == tier]
+            if not matched:
+                raise SystemExit(
+                    f"no datasets in tier {tier!r}; the tiers are A, B and C"
+                )
+            names.extend(matched)
+        else:
+            if selector not in CATALOGUE:
+                print(
+                    f"warning: {selector!r} is not in the catalogue; "
+                    f"BEIR hosts more datasets than these, trying anyway.",
+                    file=sys.stderr,
+                )
+            names.append(selector)
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return unique
+
+
 def download_one(name: str) -> None:
-    if name not in CATALOGUE:
-        print(
-            f"warning: {name!r} is not in the curated catalogue below; "
-            f"BEIR hosts more datasets than these, trying anyway.",
-            file=sys.stderr,
-        )
     dest = RAW_DIR / name
     if dest.exists():
         print(f"{name}: already downloaded at {dest}")
@@ -95,17 +133,31 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("names", nargs="*", help="dataset names, e.g. scifact nfcorpus")
+    ap.add_argument(
+        "selectors",
+        nargs="*",
+        help="dataset names, `all`, or `tier-a` / `tier-b` / `tier-c`",
+    )
     ap.add_argument("--list", action="store_true", help="print the catalogue and exit")
+    ap.add_argument(
+        "--resolve",
+        action="store_true",
+        help="print the selected names, one per line, and exit (for scripting)",
+    )
     args = ap.parse_args()
 
-    if args.list or not args.names:
+    if args.resolve:
+        for name in resolve(args.selectors or ["all"]):
+            print(name)
+        return
+
+    if args.list or not args.selectors:
         for name, (tier, size, note) in CATALOGUE.items():
             print(f"  [{tier}] {name:<12} ~{size:>9,} docs  {note}")
-        if not args.names:
+        if not args.selectors:
             return
 
-    for name in args.names:
+    for name in resolve(args.selectors):
         download_one(name)
 
 

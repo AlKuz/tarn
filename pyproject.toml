@@ -50,6 +50,12 @@ explicit_package_bases = true
 
 # pytrec_eval is a C extension with no stubs; ragas and datasets ship none that
 # mypy can use. Their call sites are checked, their internals are not.
+#
+# requests is here for a different reason: types-requests is a dev dependency, so
+# `uv run mypy` resolves it and checks normally. A mypy invoked outside the
+# project venv cannot, and would fail on the import alone. ignore_missing_imports
+# only applies when resolution fails, so this costs nothing where the stubs exist
+# and keeps the check working where they do not.
 [[tool.mypy.overrides]]
-module = ["pytrec_eval.*", "ragas.*", "datasets.*"]
+module = ["pytrec_eval.*", "ragas.*", "datasets.*", "requests.*"]
 ignore_missing_imports = true
