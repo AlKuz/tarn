@@ -12,9 +12,9 @@ the catalogue below, and why adding a new BEIR dataset later needs no new code -
 just its name.
 
 Usage:
-    python scripts/download_beir.py scifact
-    python scripts/download_beir.py nfcorpus arguana scidocs   # several at once
-    python scripts/download_beir.py --list                     # show the catalogue
+    python scripts/bench/download_beir.py scifact
+    python scripts/bench/download_beir.py nfcorpus arguana scidocs   # several at once
+    python scripts/bench/download_beir.py --list                     # show the catalogue
 """
 
 import argparse

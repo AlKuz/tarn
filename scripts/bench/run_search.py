@@ -11,8 +11,8 @@ The handshake is timed instead of slept through -- that timing is the
 cold-index measurement.
 
 Usage:
-    python scripts/run_search.py scifact
-    python scripts/run_search.py scifact --tarn-bin target/release/tarn-mcp --top-k 100
+    python scripts/bench/run_search.py scifact
+    python scripts/bench/run_search.py scifact --tarn-bin target/release/tarn-mcp --top-k 100
 """
 
 import argparse
@@ -131,7 +131,7 @@ def main() -> None:
     evals = eval_dir(args.dataset)
     if not vault.exists():
         raise SystemExit(
-            f"{vault} does not exist -- run scripts/beir_to_tarn.py {args.dataset} first"
+            f"{vault} does not exist -- run scripts/bench/beir_to_tarn.py {args.dataset} first"
         )
 
     queries = [json.loads(line) for line in (evals / "queries.jsonl").open()]

@@ -59,7 +59,7 @@ Five decisions travel together:
 3. **Drive the real binary over MCP/stdio.** Not `TarnCore::search`.
 4. **`pytrec_eval` for qrel-based scoring, with ragas's non-LLM context metrics as a second view.**
    The first compares document ids, the second compares retrieved *text*.
-5. **A Python project at the repo root, out of the Rust build.** Scripts in `scripts/`, datasets in
+5. **A Python project at the repo root, out of the Rust build.** Scripts in `scripts/bench/`, datasets in
    `data/`, results in `target/benchmarks/`. Nothing is committed but the harness itself.
 
 ### Why the real binary
@@ -158,7 +158,7 @@ decisions before code:
 
 ## More Information
 
-- [scripts/README.md](../../scripts/README.md) — the operational guide: pipeline, catalogue, metric
+- [scripts/bench/README.md](../../scripts/bench/README.md) — the operational guide: pipeline, catalogue, metric
   interpretation, and the manifest fields.
 - [ADR-0005](0005-section-as-the-index-unit.md), [ADR-0006](0006-rank-fusion-over-independent-scorers.md),
   [ADR-0011](0011-synchronous-review-pass-before-serving.md) — the decisions this bench measures.

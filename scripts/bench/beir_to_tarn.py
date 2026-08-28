@@ -21,8 +21,8 @@ sidesteps the section-vs-document aggregation problem a long-document dataset
 would need extra handling for (see README.md "Chunking granularity").
 
 Usage:
-    python scripts/beir_to_tarn.py scifact
-    python scripts/beir_to_tarn.py scifact --split test
+    python scripts/bench/beir_to_tarn.py scifact
+    python scripts/bench/beir_to_tarn.py scifact --split test
 """
 
 import argparse
@@ -64,7 +64,7 @@ def main() -> None:
     evals = eval_dir(args.dataset)
     if not raw.exists():
         raise SystemExit(
-            f"{raw} does not exist -- run scripts/download_beir.py {args.dataset} first"
+            f"{raw} does not exist -- run scripts/bench/download_beir.py {args.dataset} first"
         )
     vault.mkdir(parents=True, exist_ok=True)
     evals.mkdir(parents=True, exist_ok=True)

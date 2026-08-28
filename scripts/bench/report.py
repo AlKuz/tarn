@@ -13,7 +13,7 @@ report.py marks any row whose dataset fingerprint differs from the latest,
 rather than letting a silently re-cut corpus read as a regression in tarn.
 
 Usage:
-    python scripts/report.py
+    python scripts/bench/report.py
 """
 
 import argparse
@@ -250,7 +250,7 @@ def main() -> None:
     runs = load_runs()
     if not runs:
         raise SystemExit(
-            "no scored runs found -- run `make bench` (or scripts/evaluate.py) first"
+            "no scored runs found -- run `make bench` (or scripts/bench/evaluate.py) first"
         )
 
     by_dataset: dict[str, list[Json]] = {}

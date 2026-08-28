@@ -37,7 +37,7 @@ A second spawn here is cheap. The index and revision tracker both persist to
 serving begins almost immediately.
 
 Usage:
-    python scripts/evaluate_ragas.py scifact
+    python scripts/bench/evaluate_ragas.py scifact
 """
 
 import argparse
@@ -182,7 +182,7 @@ def main() -> None:
     if not rows:
         raise SystemExit(
             f"no scoreable rows from {run_dir / 'run.jsonl'} -- "
-            f"run scripts/run_search.py first"
+            f"run scripts/bench/run_search.py first"
         )
 
     result = evaluate(

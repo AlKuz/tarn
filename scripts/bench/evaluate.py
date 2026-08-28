@@ -10,8 +10,8 @@ is for.
 Reads target/benchmarks/runs/<run-id>/run.jsonl, writes metrics.json alongside it.
 
 Usage:
-    python scripts/evaluate.py scifact
-    python scripts/evaluate.py scifact --run-dir target/benchmarks/runs/<run-id>
+    python scripts/bench/evaluate.py scifact
+    python scripts/bench/evaluate.py scifact --run-dir target/benchmarks/runs/<run-id>
 """
 
 import argparse
@@ -90,7 +90,7 @@ def main() -> None:
 
     if not run:
         raise SystemExit(
-            f"no results in {run_dir / 'run.jsonl'} -- run scripts/run_search.py first"
+            f"no results in {run_dir / 'run.jsonl'} -- run scripts/bench/run_search.py first"
         )
 
     measures = {"recip_rank"}

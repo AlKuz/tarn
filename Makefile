@@ -15,7 +15,7 @@ cmd   ?=
 dataset  ?= scifact
 FEATURES ?= stemming
 TARN_BIN := target/release/tarn-mcp
-BENCH    := $(UV) run --quiet python scripts
+BENCH    := $(UV) run --quiet python scripts/bench
 
 GREEN  := \033[0;32m
 YELLOW := \033[0;33m

@@ -28,16 +28,16 @@ dev = [
 
 [tool.uv]
 # Not a distributable package — this project exists to pin the bench harness's
-# interpreter and dependencies. The scripts under scripts/ are run directly.
+# interpreter and dependencies. The scripts under scripts/bench/ are run directly.
 package = false
 
 [tool.ruff]
 # The stages import each other as siblings (evaluate_ragas reuses evaluate's
 # parse_hits); without this ruff sorts them as third-party.
-src = ["scripts"]
+src = ["scripts/bench"]
 
 [tool.mypy]
-files = ["scripts"]
+files = ["scripts/bench"]
 # `files` only applies when mypy is invoked with no path arguments. `exclude`
 # holds regardless, which matters because tmp/ carries the drafts these scripts
 # grew from — same module names, so an unscoped run collides on every one.
@@ -45,7 +45,7 @@ exclude = ["^tmp/", "^\\.venv/"]
 python_version = "3.12"
 strict = true
 # The stages are run as scripts from the repo root, not imported as a package.
-mypy_path = "scripts"
+mypy_path = "scripts/bench"
 explicit_package_bases = true
 
 # pytrec_eval is a C extension with no stubs; ragas and datasets ship none that

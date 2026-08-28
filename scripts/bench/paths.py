@@ -13,7 +13,7 @@ One run never overwrites another: each gets its own directory under
 from datetime import UTC, datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 # Inputs
 DATA_DIR = ROOT / "data"
@@ -58,7 +58,7 @@ def latest_run_dir(dataset: str) -> Path:
     if not candidates:
         raise SystemExit(
             f"no run directory for {dataset!r} under {RUNS_DIR} -- "
-            f"run scripts/run_search.py {dataset} first"
+            f"run scripts/bench/run_search.py {dataset} first"
         )
     return candidates[-1]
 
