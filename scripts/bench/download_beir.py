@@ -20,13 +20,14 @@ Usage:
 """
 
 import argparse
-import io
 import json
 import sys
+import tempfile
 import zipfile
 from datetime import UTC, datetime
 
 import requests
+from tqdm import tqdm
 
 from paths import RAW_DIR
 
@@ -102,10 +103,33 @@ def download_one(name: str) -> None:
         return
     url = BASE_URL.format(name=name)
     print(f"{name}: downloading {url}")
-    resp = requests.get(url, timeout=600)
-    resp.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        zf.extractall(RAW_DIR)
+
+    # Streamed to a temp file rather than held in memory. The tier-A archives are
+    # small enough that it would not matter, but msmarco is over a gigabyte
+    # compressed and buffering it whole is a needless way to run out of RAM.
+    # NamedTemporaryFile lands beside the destination, so it shares the same
+    # filesystem and a partial download is cleaned up on failure.
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=RAW_DIR, suffix=".zip") as tmp:
+        with requests.get(url, timeout=600, stream=True) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0))
+            with tqdm(
+                total=total or None,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=f"{name} download",
+                leave=False,
+            ) as bar:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    tmp.write(chunk)
+                    bar.update(len(chunk))
+        tmp.flush()
+        with zipfile.ZipFile(tmp.name) as zf:
+            members = zf.infolist()
+            for member in tqdm(members, desc=f"{name} extract", leave=False):
+                zf.extract(member, RAW_DIR)
     # Provenance: BEIR zips carry no upstream version, so the fetch is stamped
     # here and the content is hashed at adapt time. Together they are what pins
     # a score to a corpus -- see scripts/bench/README.md "Reproducibility".

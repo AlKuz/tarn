@@ -52,6 +52,7 @@ from ragas.dataset_schema import EvaluationDataset, EvaluationResult
 # ragas 0.4 warns that these moved to ragas.metrics.collections, but that module
 # exports only the LLM-judged variants -- the NonLLM* ones are still here.
 from ragas.metrics import NonLLMContextPrecisionWithReference, NonLLMContextRecall
+from tqdm import tqdm
 
 from evaluate import parse_hits  # same hit extraction, so both scorers see one list
 from mcp_client import McpStdioClient
@@ -152,9 +153,17 @@ def main() -> None:
     cache: dict[str, str] = {}
     unreachable: set[str] = set()
     fetched = 0
+    with (run_dir / "run.jsonl").open() as f:
+        run_size = sum(1 for _ in f)
+
     try:
         client.initialize()
-        for line in (run_dir / "run.jsonl").open():
+        for line in tqdm(
+            (run_dir / "run.jsonl").open(),
+            total=run_size,
+            desc=f"{args.dataset} contexts",
+            unit="q",
+        ):
             rec = json.loads(line)
             qid = rec["query_id"]
             if qid not in relevant or qid not in queries:

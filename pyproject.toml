@@ -17,6 +17,9 @@ dependencies = [
     # The distance measure behind the NonLLM* context metrics. ragas does not
     # declare it, and raises ImportError at metric construction without it.
     "rapidfuzz>=3.14.3",
+    # Progress for the long stages: a 25k-note adapt or an 8M-doc download is
+    # otherwise indistinguishable from a hang.
+    "tqdm>=4.67",
 ]
 
 [dependency-groups]
@@ -24,6 +27,7 @@ dev = [
     "mypy>=2.3.1",
     "ruff>=0.16.5",
     "types-requests>=2.32",
+    "types-tqdm>=4.67",
 ]
 
 [tool.uv]
@@ -51,11 +55,11 @@ explicit_package_bases = true
 # pytrec_eval is a C extension with no stubs; ragas and datasets ship none that
 # mypy can use. Their call sites are checked, their internals are not.
 #
-# requests is here for a different reason: types-requests is a dev dependency, so
-# `uv run mypy` resolves it and checks normally. A mypy invoked outside the
-# project venv cannot, and would fail on the import alone. ignore_missing_imports
-# only applies when resolution fails, so this costs nothing where the stubs exist
-# and keeps the check working where they do not.
+# requests and tqdm are here for a different reason: their stubs are dev
+# dependencies, so `uv run mypy` resolves them and checks normally. A mypy invoked
+# outside the project venv cannot, and would fail on the import alone.
+# ignore_missing_imports only applies when resolution fails, so this costs nothing
+# where the stubs exist and keeps the check working where they do not.
 [[tool.mypy.overrides]]
-module = ["pytrec_eval.*", "ragas.*", "datasets.*", "requests.*"]
+module = ["pytrec_eval.*", "ragas.*", "datasets.*", "requests.*", "tqdm.*"]
 ignore_missing_imports = true

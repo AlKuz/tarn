@@ -23,6 +23,8 @@ import sys
 import time
 from typing import Any
 
+from tqdm import tqdm
+
 from mcp_client import McpStdioClient
 from paths import eval_dir, new_run_dir, state_dir, vault_dir
 from provenance import build_manifest
@@ -241,7 +243,7 @@ def main() -> None:
         run_path = run_dir / "run.jsonl"
         underfilled = 0
         with run_path.open("w") as out:
-            for i, q in enumerate(queries, 1):
+            for q in tqdm(queries, desc=f"{args.dataset} queries", unit="q"):
                 t = time.perf_counter()
                 arguments: Json = {
                     "query": q["text"],
@@ -265,8 +267,6 @@ def main() -> None:
                     )
                     + "\n"
                 )
-                if i % 50 == 0 or i == len(queries):
-                    print(f"  {i}/{len(queries)} queries", file=sys.stderr)
 
         manifest["timing"]["search_seconds"] = round(
             time.perf_counter() - t0 - index_ready_seconds, 3

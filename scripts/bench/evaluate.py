@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytrec_eval
+from tqdm import tqdm
 
 from paths import eval_dir, latest_run_dir
 
@@ -71,10 +72,18 @@ def main() -> None:
     id_map = json.loads((evals / "id_map.json").read_text())
     filename_to_docid = {v: k for k, v in id_map.items()}
 
+    with (run_dir / "run.jsonl").open() as f:
+        run_size = sum(1 for _ in f)
+
     run: dict[str, dict[str, float]] = {}
     latencies: list[float] = []
     empty = 0
-    for line in (run_dir / "run.jsonl").open():
+    for line in tqdm(
+        (run_dir / "run.jsonl").open(),
+        total=run_size,
+        desc=f"{args.dataset} scoring",
+        unit="q",
+    ):
         rec = json.loads(line)
         latencies.append(rec["latency_ms"])
         hits = parse_hits(rec, filename_to_docid)

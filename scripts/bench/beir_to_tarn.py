@@ -32,6 +32,8 @@ import re
 import sys
 from pathlib import Path
 
+from tqdm import tqdm
+
 from paths import eval_dir, raw_dir, vault_dir
 
 
@@ -69,9 +71,16 @@ def main() -> None:
     vault.mkdir(parents=True, exist_ok=True)
     evals.mkdir(parents=True, exist_ok=True)
 
+    # Line count first so the bar has a total. Cheap next to writing the notes,
+    # and a bar without a total tells you nothing about how long is left.
+    with (raw / "corpus.jsonl").open() as f:
+        corpus_size = sum(1 for _ in f)
+
     id_map: dict[str, str] = {}  # beir doc_id -> markdown filename
     with (raw / "corpus.jsonl").open() as f:
-        for line in f:
+        for line in tqdm(
+            f, total=corpus_size, desc=f"{args.dataset} notes", unit="note"
+        ):
             doc = json.loads(line)
             doc_id = doc["_id"]
             filename = safe_filename(doc_id) + ".md"
