@@ -1,8 +1,7 @@
 # Retrieval evaluation
 
 How Tarn's retrieval quality is measured: which datasets, by what method, and what each number means.
-Commands live in the [root README](../../README.md#benchmarks); the decision and its alternatives are
-in [ADR-0016](../../docs/adr/0016-retrieval-eval-bench.md).
+Commands live in the [root README](../../README.md#benchmarks).
 
 Scope is **retrieval only**. No answer generation, no LLM judge. An answer's quality is a product of
 retrieval *and* the answering model, so with generation in the loop a ranking regression and a prompt
@@ -48,11 +47,10 @@ lexical-only baseline today but worth having wired for the graph layer later).
 first — so an external number exists to check yourself against. BM25 there is widely reported at
 nDCG@10 ≈ 0.665.
 
-**Tiers B and C are not currently reachable.** Cold indexing is O(N²) in vault size:
-`InMemoryIndex::update` re-serialises all four state files on every note, a cost
-[ADR-0011](../../docs/adr/0011-synchronous-review-pass-before-serving.md) records. scifact's 5,183
-notes take about five and a half minutes; fiqa is eleven times larger and msmarco seventeen hundred
-times. That is a prerequisite to fix, not a parameter to tune.
+**Tiers B and C are not currently reachable.** Cold indexing is O(N²) in vault size, because
+`InMemoryIndex::update` re-serialises all four state files on every note. scifact's 5,183 notes take
+about five and a half minutes; fiqa is eleven times larger and msmarco seventeen hundred times. That
+is a prerequisite to fix, not a parameter to tune.
 
 **English only.** There is a single global analysis chain, so a mixed-language corpus would silently
 mis-score. Everything in the table above is English.
@@ -71,12 +69,11 @@ Both are gitignored.
 | `run_search.py` | the vault, via the **binary** | `runs/<run-id>/{manifest.json, run.jsonl}` |
 | `evaluate.py` | `run.jsonl` + qrels | `runs/<run-id>/metrics.json` |
 | `evaluate_ragas.py` | `run.jsonl` + retrieved text | `runs/<run-id>/ragas_metrics.json` |
-| `report.py` | every run | `target/benchmarks/report.md` |
+| `report.py` | every run | `report.md` + `reports/<version>.md` |
 
 `mcp_client.py` (a minimal MCP stdio client), `paths.py` and `provenance.py` are shared, not stages.
 
-One run never overwrites another: each gets `runs/<UTC timestamp>-<dataset>-<tarn commit>/`, and the
-report reads all of them, so it carries its own history with a delta column.
+One run never overwrites another: each gets `runs/<UTC timestamp>-<dataset>-<tarn commit>/`.
 
 ### Queries go through the real binary
 
@@ -89,25 +86,22 @@ itself — and a library-level bench would score a path no client takes.
 Five choices in how queries are issued, each of which would corrupt the result if made differently:
 
 **No settle-time sleep, and there must not be one.** Tarn attaches the stdio transport only after
-`start_sync`'s synchronous review pass completes
-([ADR-0011](../../docs/adr/0011-synchronous-review-pass-before-serving.md)), so a successful
-`initialize` response *is* the index-ready signal. The harness times the handshake rather than
-sleeping through it, then asserts readiness by comparing `tarn://vault/info`'s `note_count` — which
-reports *indexed* counts, not storage counts — against the corpus size. A partial index otherwise
-scores near-zero on everything and reads like a regression in Tarn.
+`start_sync`'s synchronous review pass completes, so a successful `initialize` response *is* the
+index-ready signal. The harness times the handshake rather than sleeping through it, then asserts
+readiness by comparing `tarn://vault/info`'s `note_count` — which reports *indexed* counts, not
+storage counts — against the corpus size. A partial index otherwise scores near-zero on everything
+and reads like a regression in Tarn.
 
 **`limit` is 100, not Tarn's default of 20.** It caps sections *before* they are grouped into notes,
 so notes returned ≤ limit. The default would silently cap scoring below the k=100 cutoff.
 
-**`score_threshold` stays at 0.0.** It is compared against the fused RRF score
-([ADR-0006](../../docs/adr/0006-rank-fusion-over-independent-scorers.md), k=60), where two pipelines
-cap at ≈ 0.0328 — despite the parameter description claiming a 0.0–1.0 scale. Any "sensible"
-threshold returns nothing at all.
+**`score_threshold` stays at 0.0.** It is compared against the fused reciprocal-rank score (k=60),
+where two ranking pipelines cap at ≈ 0.0328 — despite the parameter description claiming a 0.0–1.0
+scale. Any "sensible" threshold returns nothing at all.
 
-**The generated `# {title}` heading is load-bearing.** Tarn indexes sections delimited by headings
-([ADR-0005](../../docs/adr/0005-section-as-the-index-unit.md)), so a BEIR document with an empty
-title would produce a note with no heading. The adapter falls back to the doc id, which guarantees
-one section per note.
+**The generated `# {title}` heading is load-bearing.** Tarn indexes sections delimited by headings,
+so a BEIR document with an empty title would produce a note with no heading. The adapter falls back
+to the doc id, which guarantees one section per note.
 
 **Only judged queries are issued.** BEIR ships every split's queries in one file — scifact has 1,109,
 of which 300 are judged in `test`. An unjudged query cannot be scored, so issuing it is pure cost and
@@ -115,6 +109,36 @@ inflates an "unjudged" count that reads like a plumbing bug.
 
 Tarn's returned order is preserved throughout. The index returns pre-sorted results, so re-sorting
 would measure the harness rather than the engine.
+
+### How results are organised
+
+Reports are split by Tarn version, and within a version by configuration.
+
+```text
+target/benchmarks/
+  report.md              entry point: most recent run per dataset, and a row per version
+  reports/0.9.1.md       one version in full: configurations, history, per-run detail
+  runs/<run-id>/         the raw artifacts every report is derived from
+```
+
+Splitting by version is what keeps the files bounded. Runs accumulate for as long as the bench is
+used, and a single file holding all of them grows until nobody opens it. A version report covers one
+version and then stops changing — which is also the unit anyone actually compares, since a score is
+only meaningful next to the build that produced it.
+
+Within a version, runs are grouped by **configuration**: the cargo features and the search parameters
+(`limit`, `token_limit`, `score_threshold`, `rendered`) — the things that change what comes back.
+Holding the version fixed and varying one of them is how a tuning question gets answered. Does
+stemming earn its keep? Does a larger `limit` buy recall, and at what latency? What does a token
+budget cost in nDCG? Each dataset gets a table with one row per configuration, best nDCG@10 first,
+and the history table records which configuration produced each run.
+
+A worked example: running scifact at Tarn's default `limit=20` alongside the harness default of 100
+leaves nDCG@10 identical at 0.6618 but drops Recall@100 from 0.9014 to 0.8385 — a configuration
+simply cannot fill a cutoff deeper than the number of results it asked for.
+
+The summary tables show the **most recent** run, not the best one, so they name the configuration
+that produced it. Otherwise a deliberately degraded experiment would read as Tarn's headline number.
 
 ### Reproducibility
 

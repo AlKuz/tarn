@@ -7,7 +7,9 @@ holds everything a run produces, so results sit alongside the release binary
 that produced them and are covered by the existing `/target` gitignore.
 
 One run never overwrites another: each gets its own directory under
-`runs/<run-id>/`, and `report.py` reads all of them.
+`runs/<run-id>/`. Reports are split per tarn version, because a single file
+accumulating every run of every version grows without bound; `report.md` stays
+small and points at them.
 """
 
 from datetime import UTC, datetime
@@ -25,7 +27,8 @@ EVAL_DIR = DATA_DIR / "eval"  # queries, qrels, id_map, checksums
 BENCH_DIR = ROOT / "target" / "benchmarks"
 STATE_DIR = BENCH_DIR / "state"  # tarn's --index-path
 RUNS_DIR = BENCH_DIR / "runs"
-REPORT_PATH = BENCH_DIR / "report.md"
+REPORTS_DIR = BENCH_DIR / "reports"  # one report per tarn version
+INDEX_PATH = BENCH_DIR / "report.md"  # entry point: latest scores + links
 
 
 def vault_dir(dataset: str) -> Path:
@@ -61,6 +64,13 @@ def latest_run_dir(dataset: str) -> Path:
             f"run scripts/bench/run_search.py {dataset} first"
         )
     return candidates[-1]
+
+
+def version_report_path(version: str) -> Path:
+    """Report file for one tarn version. Version strings are filename-safe, but a
+    pre-release suffix could carry a separator, so anything unusual is folded."""
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in version)
+    return REPORTS_DIR / f"{safe}.md"
 
 
 def all_run_dirs() -> list[Path]:

@@ -1,11 +1,29 @@
 """
-Consolidate every benchmark run into one Markdown file.
+Consolidate benchmark runs into Markdown.
 
-Reads target/benchmarks/runs/*/ and writes target/benchmarks/report.md.
+Reads target/benchmarks/runs/*/ and writes:
 
-Results are not committed, so this file carries its own history: each dataset
+    report.md                 the entry point -- latest score per dataset, and
+                              a link to every version report
+    reports/<version>.md      one file per tarn version, holding that version's
+                              runs in full
+
+Results are not committed, so the reports carry their own history: each dataset
 gets a table of its runs, most recent first, with a delta against the previous
 one. Performance movement is visible without needing git.
+
+Splitting by version is what keeps that bounded. Runs accumulate for as long as
+the bench is used, and a single file holding all of them grows until nobody
+opens it. A version report covers one version and then stops changing, which is
+also the unit anyone actually compares: a score is only meaningful next to the
+build that produced it.
+
+Within a version, runs are grouped by *configuration* -- the cargo features and
+the search parameters, the things that change what comes back. Holding the
+version fixed and varying one of those is how a tuning question gets answered:
+does stemming earn its keep, does a larger `limit` buy recall, what does a
+token budget cost. The configuration tables are that comparison; the history
+tables answer the different question of whether anything drifted over time.
 
 Two runs are only comparable if they scored the same corpus. BEIR ships no
 upstream version number, so the sha256 of the source files is the version --
@@ -21,7 +39,7 @@ import json
 from typing import Any
 
 from download_beir import CATALOGUE, tier_of
-from paths import REPORT_PATH, all_run_dirs
+from paths import INDEX_PATH, REPORTS_DIR, all_run_dirs, version_report_path
 from provenance import dataset_fingerprint
 
 Json = dict[str, Any]
@@ -71,6 +89,142 @@ def index_time(manifest: Json) -> str:
     return f"{rendered} {'cold' if timing.get('cold_start') else 'warm'}"
 
 
+def tarn_version(manifest: Json) -> str:
+    return str(manifest.get("tarn", {}).get("version") or "unknown")
+
+
+def config_of(manifest: Json) -> Json:
+    """The knobs that change what a search returns.
+
+    Deliberately not the commit, the machine or the corpus: those are the axes
+    the other tables vary. This is what you would set out to compare.
+    """
+    tarn = manifest.get("tarn", {})
+    params = manifest.get("params", {})
+    return {
+        "features": tarn.get("features") or "—",
+        "profile": tarn.get("profile") or "—",
+        "limit": params.get("limit"),
+        "token_limit": params.get("token_limit"),
+        "score_threshold": params.get("score_threshold"),
+        "rendered": params.get("rendered"),
+    }
+
+
+def config_key(manifest: Json) -> str:
+    return json.dumps(config_of(manifest), sort_keys=True)
+
+
+def config_short(manifest: Json) -> str:
+    """Compact, self-describing label for a summary row.
+
+    A summary shows the most recent run, which may well have been a deliberately
+    degraded experiment. Naming the configuration inline stops that reading as
+    tarn's headline number.
+    """
+    cfg = config_of(manifest)
+    parts = [f"`{cfg['features']}`", f"k={cfg['limit']}"]
+    if cfg["score_threshold"]:
+        parts.append(f"thr={cfg['score_threshold']}")
+    if cfg["token_limit"]:
+        parts.append(f"tok={cfg['token_limit']}")
+    if cfg["rendered"]:
+        parts.append("rendered")
+    return " ".join(parts)
+
+
+def assign_config_ids(runs: list[Json]) -> dict[str, str]:
+    """C1, C2, ... in first-seen order, so ids are stable within a report."""
+    ids: dict[str, str] = {}
+    for run in runs:
+        key = config_key(run["manifest"])
+        if key not in ids:
+            ids[key] = f"C{len(ids) + 1}"
+    return ids
+
+
+def config_legend(runs: list[Json], ids: dict[str, str]) -> list[str]:
+    seen: dict[str, Json] = {}
+    for run in runs:
+        seen.setdefault(config_key(run["manifest"]), config_of(run["manifest"]))
+    lines = [
+        "| Config | Features | Profile | limit | token_limit | score_threshold | rendered |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for key, cfg in seen.items():
+        lines.append(
+            f"| **{ids[key]}** "
+            f"| `{cfg['features']}` "
+            f"| {cfg['profile']} "
+            f"| {cfg['limit'] if cfg['limit'] is not None else '—'} "
+            f"| {cfg['token_limit'] if cfg['token_limit'] is not None else 'none'} "
+            f"| {cfg['score_threshold'] if cfg['score_threshold'] is not None else '—'} "
+            f"| {cfg['rendered']} |"
+        )
+    return lines
+
+
+def config_comparison(runs: list[Json], ids: dict[str, str]) -> list[str]:
+    """One row per configuration for a single dataset, best nDCG@10 first.
+
+    The latest run of each configuration supplies the numbers; earlier runs of
+    the same configuration are the history table's business.
+    """
+    latest_per_config: dict[str, Json] = {}
+    counts: dict[str, int] = {}
+    for run in runs:
+        key = config_key(run["manifest"])
+        latest_per_config[key] = run
+        counts[key] = counts.get(key, 0) + 1
+
+    if len(latest_per_config) < 2:
+        return []
+
+    ordered = sorted(
+        latest_per_config.items(),
+        key=lambda kv: metric(kv[1], "ndcg_cut_10") or -1.0,
+        reverse=True,
+    )
+    best = metric(ordered[0][1], "ndcg_cut_10")
+
+    lines = [
+        "### Configurations compared",
+        "",
+        "Same version, same corpus, different knobs. Best nDCG@10 first.",
+        "",
+        "| Config | nDCG@10 | Δ | Recall@100 | MRR | MAP@10 | p50 | p95 | Runs |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for key, run in ordered:
+        latency = run["metrics"].get("latency_ms", {})
+        current = metric(run, "ndcg_cut_10")
+        gap = "best" if run is ordered[0][1] else delta(current, best)
+        lines.append(
+            f"| **{ids[key]}** "
+            f"| {fmt(current)} "
+            f"| {gap} "
+            f"| {fmt(metric(run, 'recall_100'))} "
+            f"| {fmt(metric(run, 'recip_rank'))} "
+            f"| {fmt(metric(run, 'map_cut_10'))} "
+            f"| {latency.get('p50', 0):.0f}ms "
+            f"| {latency.get('p95', 0):.0f}ms "
+            f"| {counts[key]} |"
+        )
+
+    fingerprints = {
+        dataset_fingerprint(r["manifest"]) for r in latest_per_config.values()
+    }
+    if len(fingerprints) > 1:
+        lines += [
+            "",
+            (
+                "> ⚠ These configurations did not all score the same corpus, so the "
+                "comparison is not clean. Re-run them against one dataset fingerprint."
+            ),
+        ]
+    return lines
+
+
 def tarn_label(manifest: Json) -> str:
     tarn = manifest.get("tarn", {})
     dirty = "-dirty" if tarn.get("dirty") else ""
@@ -99,9 +253,9 @@ def summary_table(latest: dict[str, Json]) -> list[str]:
     lines = [
         (
             "| Dataset | Tier | Corpus | Queries | nDCG@10 | Recall@100 | MRR | MAP@10 "
-            "| Index | p50 | p95 | tarn |"
+            "| Index | p50 | p95 | tarn | Config |"
         ),
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name in sorted(latest):
         run = latest[name]
@@ -120,26 +274,31 @@ def summary_table(latest: dict[str, Json]) -> list[str]:
             f"| {index_time(manifest)} "
             f"| {latency.get('p50', 0):.0f}ms "
             f"| {latency.get('p95', 0):.0f}ms "
-            f"| {tarn_label(manifest)} |"
+            f"| {tarn_label(manifest)} "
+            f"| {config_short(manifest)} |"
         )
     return lines
 
 
-def history_table(runs: list[Json]) -> list[str]:
+def history_table(runs: list[Json], ids: dict[str, str] | None = None) -> list[str]:
     """Newest first, with a delta against the run before it."""
     newest_fingerprint = dataset_fingerprint(runs[-1]["manifest"])
+    config_column = "| Config " if ids else ""
+    config_rule = "|---" if ids else ""
     lines = [
-        "| Run | tarn | nDCG@10 | Δ | Recall@100 | MRR | Corpus |",
-        "|---|---|---|---|---|---|---|",
+        f"| Run | tarn {config_column}| nDCG@10 | Δ | Recall@100 | MRR | Corpus |",
+        f"|---|---{config_rule}|---|---|---|---|---|",
     ]
     ordered = list(reversed(runs))[:HISTORY_LIMIT]
     for i, run in enumerate(ordered):
         previous = ordered[i + 1] if i + 1 < len(ordered) else None
         fingerprint = dataset_fingerprint(run["manifest"])
         mark = "" if fingerprint == newest_fingerprint else " ⚠"
+        config_cell = f"| {ids[config_key(run['manifest'])]} " if ids else ""
         lines.append(
             f"| `{run['id']}` "
             f"| {tarn_label(run['manifest'])} "
+            f"{config_cell}"
             f"| {fmt(metric(run, 'ndcg_cut_10'))} "
             f"| {delta(metric(run, 'ndcg_cut_10'), metric(previous, 'ndcg_cut_10') if previous else None)} "
             f"| {fmt(metric(run, 'recall_100'))} "
@@ -163,7 +322,7 @@ def detail_section(run: Json) -> list[str]:
     aggregate = metrics.get("aggregate", {})
     lines = [
         "",
-        "**Latest run, all cutoffs**",
+        "### Latest run",
         "",
         "| k | nDCG | Recall | Precision | MAP |",
         "|---|---|---|---|---|",
@@ -200,11 +359,13 @@ def detail_section(run: Json) -> list[str]:
         aggregate_ragas = run["ragas"].get("aggregate", {})
         lines += [
             "",
+            "### Chunk-level cross-check",
+            "",
             (
-                "**Chunk-level cross-check** (ragas, non-LLM string distance at a 0.5 "
-                "threshold). It scores the text tarn actually returned, so it sees "
-                "section-level failures that doc-id scoring cannot. Coarser than the "
-                "metrics above — read it as a signal, not a verdict."
+                "ragas non-LLM string distance at a 0.5 threshold. It scores the text "
+                "tarn actually returned, so it sees section-level failures that doc-id "
+                "scoring cannot. Coarser than the metrics above — read it as a signal, "
+                "not a verdict."
             ),
             "",
             "| Metric | Score |",
@@ -244,35 +405,95 @@ def detail_section(run: Json) -> list[str]:
     return lines
 
 
-def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
-
-    runs = load_runs()
-    if not runs:
-        raise SystemExit(
-            "no scored runs found -- run `make bench` (or scripts/bench/evaluate.py) first"
-        )
-
+def version_report(version: str, runs: list[Json]) -> str:
+    """One version's runs in full: a summary row per dataset, then per-dataset
+    history and detail."""
     by_dataset: dict[str, list[Json]] = {}
     for run in runs:
         by_dataset.setdefault(run["metrics"]["dataset"], []).append(run)
     latest = {name: rs[-1] for name, rs in by_dataset.items()}
 
-    generated_from = ", ".join(
-        f"{n} ({len(rs)} runs)" for n, rs in sorted(by_dataset.items())
-    )
+    covered = ", ".join(f"{n} ({len(rs)} runs)" for n, rs in sorted(by_dataset.items()))
     lines = [
-        "# Tarn Retrieval Benchmarks",
+        f"# Tarn Retrieval Benchmarks — {version}",
         "",
         "> GENERATED by `make bench cmd=report` from `target/benchmarks/runs/`.",
         "> Do not edit by hand — re-run the bench instead.",
-        f"> Covering {generated_from}.",
+        f"> Covering {covered}.",
+        "",
+        "[← all versions](../report.md)",
         "",
         (
             "Every number below comes from driving the real `tarn-mcp` binary over "
             "MCP/stdio against a BEIR corpus converted into a tarn vault. `nDCG@10` "
             "leads because it is what BEIR leaderboards headline, so it is externally "
             "comparable."
+        ),
+        "",
+        "## Summary",
+        "",
+    ]
+    lines += summary_table(latest)
+
+    pending = [n for n in CATALOGUE if n not in latest]
+    if pending:
+        lines += [
+            "",
+            (
+                f"**Not run on this version** ({len(pending)}): {', '.join(pending)}. "
+                "Run one with `make bench dataset=<name>`."
+            ),
+        ]
+
+    ids = assign_config_ids(runs)
+    if len(ids) > 1:
+        lines += ["", "## Configurations", ""]
+        lines += config_legend(runs, ids)
+    else:
+        only = config_of(runs[0])
+        lines += [
+            "",
+            (
+                f"All runs on this version used one configuration: features "
+                f"`{only['features']}`, limit {only['limit']}, score_threshold "
+                f"{only['score_threshold']}. Vary one and the per-dataset tables below "
+                f"gain a comparison."
+            ),
+        ]
+
+    for name in sorted(by_dataset):
+        lines += ["", f"## {name}", ""]
+        comparison = config_comparison(by_dataset[name], ids)
+        if comparison:
+            lines += comparison
+            lines += ["", "### History", ""]
+        lines += history_table(by_dataset[name], ids if len(ids) > 1 else None)
+        lines += detail_section(latest[name])
+
+    return "\n".join(lines) + "\n"
+
+
+def index(by_version: dict[str, list[Json]]) -> str:
+    """The entry point. Latest score per dataset across every version, then one
+    row per version report. Both grow slowly, unlike the run list."""
+    newest_first = sorted(by_version, reverse=True)
+
+    latest: dict[str, Json] = {}
+    for version in reversed(newest_first):  # oldest first, so newest wins
+        for run in by_version[version]:
+            latest[run["metrics"]["dataset"]] = run
+
+    lines = [
+        "# Tarn Retrieval Benchmarks",
+        "",
+        "> GENERATED by `make bench cmd=report` from `target/benchmarks/runs/`.",
+        "> Do not edit by hand — re-run the bench instead.",
+        "",
+        (
+            "Most recent run for each dataset, across all versions — not necessarily "
+            "the best one, so the configuration that produced it is named. Per-version "
+            "reports below hold every run in full, with configuration comparisons, "
+            "history and deltas."
         ),
         "",
         "## Latest",
@@ -285,19 +506,50 @@ def main() -> None:
         lines += [
             "",
             (
-                f"**Not yet run** ({len(pending)}): {', '.join(pending)}. "
+                f"**Never run** ({len(pending)}): {', '.join(pending)}. "
                 "Run one with `make bench dataset=<name>`."
             ),
         ]
 
-    for name in sorted(by_dataset):
-        lines += ["", f"## {name}", ""]
-        lines += history_table(by_dataset[name])
-        lines += detail_section(latest[name])
+    lines += [
+        "",
+        "## Versions",
+        "",
+        "| Version | Runs | Datasets | Report |",
+        "|---|---|---|---|",
+    ]
+    for version in newest_first:
+        runs = by_version[version]
+        datasets = sorted({r["metrics"]["dataset"] for r in runs})
+        link = version_report_path(version).name
+        lines.append(
+            f"| {version} | {len(runs)} | {', '.join(datasets)} | [reports/{link}](reports/{link}) |"
+        )
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text("\n".join(lines) + "\n")
-    print(f"wrote {REPORT_PATH}")
+    return "\n".join(lines) + "\n"
+
+
+def main() -> None:
+    argparse.ArgumentParser(description=__doc__).parse_args()
+
+    runs = load_runs()
+    if not runs:
+        raise SystemExit(
+            "no scored runs found -- run `make bench` (or scripts/bench/evaluate.py) first"
+        )
+
+    by_version: dict[str, list[Json]] = {}
+    for run in runs:
+        by_version.setdefault(tarn_version(run["manifest"]), []).append(run)
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    for version, version_runs in sorted(by_version.items()):
+        path = version_report_path(version)
+        path.write_text(version_report(version, version_runs))
+        print(f"wrote {path}")
+
+    INDEX_PATH.write_text(index(by_version))
+    print(f"wrote {INDEX_PATH}")
 
 
 if __name__ == "__main__":
