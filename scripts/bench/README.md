@@ -16,11 +16,17 @@ All ten are in [BEIR](https://github.com/beir-cellar/beir)'s uniform format
 and one adapter cover every one of them, and why adding another dataset is adding its name to
 `CATALOGUE` rather than writing code.
 
-| Tier | Use for | Datasets |
-|---|---|---|
-| A — smoke | fast local iteration | scifact, nfcorpus, arguana, scidocs |
-| B — everyday | the number you watch day to day | fiqa, trec-covid, quora |
-| C — scale | occasional; stresses index size and query latency | nq, hotpotqa, msmarco |
+They are grouped into three tiers by corpus size. The tier is not something you pass to `make bench`
+— it is a guide for choosing names, because size is what decides whether a run finishes at all.
+
+| Tier | Use for | Datasets | Corpus | Cold index |
+|---|---|---|---|---|
+| A — smoke | fast local iteration | `nfcorpus` `scifact` `arguana` `scidocs` | 3.6k – 25.7k | 3 min – 2 hrs |
+| B — everyday | the number you watch day to day | `fiqa` `trec-covid` `quora` | 57k – 523k | hours |
+| C — scale | stresses index size and query latency | `nq` `hotpotqa` `msmarco` | 2.7M – 8.8M | not feasible |
+
+Those times are not a hardware limit, and they are the reason the tiers matter — see
+[Tiers B and C](#tiers-b-and-c-are-not-currently-reachable) below.
 
 | Dataset | Domain | Corpus | Test queries | Relevance | License |
 |---|---|---|---|---|---|
@@ -47,10 +53,21 @@ lexical-only baseline today but worth having wired for the graph layer later).
 first — so an external number exists to check yourself against. BM25 there is widely reported at
 nDCG@10 ≈ 0.665.
 
-**Tiers B and C are not currently reachable.** Cold indexing is O(N²) in vault size, because
-`InMemoryIndex::update` re-serialises all four state files on every note. scifact's 5,183 notes take
-about five and a half minutes; fiqa is eleven times larger and msmarco seventeen hundred times. That
-is a prerequisite to fix, not a parameter to tune.
+### Tiers B and C are not currently reachable
+
+Cold indexing is **O(N²)** in vault size, because `InMemoryIndex::update` re-serialises all four
+state files on every note. Measured: scifact's 5,183 notes take five and a half minutes. scidocs, at
+five times the size, takes upwards of two hours; fiqa is eleven times larger again and msmarco
+seventeen hundred times.
+
+So a realistic tier-A run is three of its four corpora:
+
+```bash
+make bench dataset="nfcorpus scifact arguana"
+```
+
+This is a prerequisite to fix, not a parameter to tune. Until it is, the bench measures the ceiling
+rather than pretending it is not there.
 
 **English only.** There is a single global analysis chain, so a mixed-language corpus would silently
 mis-score. Everything in the table above is English.

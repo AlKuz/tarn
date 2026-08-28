@@ -10,11 +10,11 @@ CARGO := cargo
 UV    := uv
 cmd   ?=
 
-# Benchmark settings. `dataset` selects one or more BEIR corpora: names, `all`,
-# or `tier-a` / `tier-b` / `tier-c`. scifact is the default because it is tier A
-# and the one most BEIR baseline papers report first, so a comparable number
-# exists. The selectors are resolved against the catalogue in download_beir.py,
-# which stays the single source of truth for what exists.
+# Benchmark settings. `dataset` selects one or more BEIR corpora by name, or
+# `all` for the whole catalogue. scifact is the default: it is small, and the one
+# most BEIR baseline papers report first, so a comparable number exists. Names
+# are resolved against the catalogue in download_beir.py, which stays the single
+# source of truth for what exists.
 dataset  ?= scifact
 
 # The configuration under test. report.py groups runs by exactly these, so
@@ -63,7 +63,6 @@ help:
 	@printf "  make test cmd=coverage      Generate HTML coverage report\n"
 	@printf "  make bench                  Full retrieval eval on scifact\n"
 	@printf "  make bench dataset=nfcorpus Another corpus\n"
-	@printf "  make bench dataset=tier-a   Every tier-A corpus\n"
 	@printf "  make bench dataset=all      The whole catalogue\n"
 	@printf "  make bench dataset=\"scifact nfcorpus\"\n"
 	@printf "  make bench TOP_K=20         Compare a configuration against the default\n\n"

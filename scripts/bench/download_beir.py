@@ -15,9 +15,8 @@ Usage:
     python scripts/bench/download_beir.py scifact
     python scripts/bench/download_beir.py nfcorpus arguana scidocs   # several at once
     python scripts/bench/download_beir.py all                        # the whole catalogue
-    python scripts/bench/download_beir.py tier-a                     # one tier
     python scripts/bench/download_beir.py --list                     # show the catalogue
-    python scripts/bench/download_beir.py --resolve tier-a           # names only, for scripting
+    python scripts/bench/download_beir.py --resolve all              # names only, for scripting
 """
 
 import argparse
@@ -67,34 +66,25 @@ def tier_of(name: str) -> str:
 def resolve(selectors: list[str]) -> list[str]:
     """Expand selectors into dataset names, in order, without duplicates.
 
-    A selector is `all`, `tier-a`/`tier-b`/`tier-c`, or a dataset name. Keeping
-    this here rather than in the Makefile means the catalogue stays the single
-    source of truth -- a name added to CATALOGUE is immediately selectable.
+    A selector is a dataset name or `all`. Keeping this here rather than in the
+    Makefile means the catalogue stays the single source of truth -- a name added
+    to CATALOGUE is immediately selectable.
 
     An unknown name is passed through with a warning rather than rejected, for
     the same reason download_one does: BEIR hosts more datasets than these.
     """
     names: list[str] = []
     for selector in selectors:
-        key = selector.lower()
-        if key == "all":
+        if selector.lower() == "all":
             names.extend(CATALOGUE)
-        elif key.startswith("tier-"):
-            tier = key.removeprefix("tier-").upper()
-            matched = [n for n, (t, _, _) in CATALOGUE.items() if t == tier]
-            if not matched:
-                raise SystemExit(
-                    f"no datasets in tier {tier!r}; the tiers are A, B and C"
-                )
-            names.extend(matched)
-        else:
-            if selector not in CATALOGUE:
-                print(
-                    f"warning: {selector!r} is not in the catalogue; "
-                    f"BEIR hosts more datasets than these, trying anyway.",
-                    file=sys.stderr,
-                )
-            names.append(selector)
+            continue
+        if selector not in CATALOGUE:
+            print(
+                f"warning: {selector!r} is not in the catalogue; "
+                f"BEIR hosts more datasets than these, trying anyway.",
+                file=sys.stderr,
+            )
+        names.append(selector)
 
     seen: set[str] = set()
     unique: list[str] = []
@@ -118,7 +108,7 @@ def download_one(name: str) -> None:
         zf.extractall(RAW_DIR)
     # Provenance: BEIR zips carry no upstream version, so the fetch is stamped
     # here and the content is hashed at adapt time. Together they are what pins
-    # a score to a corpus -- see scripts/README.md "Reproducibility".
+    # a score to a corpus -- see scripts/bench/README.md "Reproducibility".
     (dest / "download.json").write_text(
         json.dumps(
             {"name": name, "url": url, "downloaded_at": datetime.now(UTC).isoformat()},
@@ -136,7 +126,7 @@ def main() -> None:
     ap.add_argument(
         "selectors",
         nargs="*",
-        help="dataset names, `all`, or `tier-a` / `tier-b` / `tier-c`",
+        help="dataset names, or `all` for the whole catalogue",
     )
     ap.add_argument("--list", action="store_true", help="print the catalogue and exit")
     ap.add_argument(

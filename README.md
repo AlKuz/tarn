@@ -209,23 +209,21 @@ make bench cmd=list             # The ten-dataset catalogue with tiers and sizes
 
 ### Choosing datasets
 
-`dataset` takes one or more names, a tier, or the whole catalogue. Selectors are resolved against the
-catalogue, so an unknown tier is an error and an unknown name is a warning (BEIR hosts more corpora than the
-ten listed).
+`dataset` takes one name, several, or `all`.
 
 ```bash
-make bench dataset=nfcorpus              # One corpus
-make bench dataset="scifact nfcorpus"    # Several
-make bench dataset=tier-a                # Every tier-A corpus
-make bench dataset=all                   # The whole catalogue
+make bench dataset=nfcorpus                      # One corpus
+make bench dataset="scifact nfcorpus arguana"    # Several
+make bench dataset=all                           # The whole catalogue
 ```
+
+`make bench cmd=list` prints the ten-corpus catalogue with sizes. Which of them are worth running — and
+which will not finish, because cold indexing is O(N²) in vault size — is in
+[scripts/bench/README.md](scripts/bench/README.md#datasets). `dataset=all` will not complete today.
 
 A multi-dataset run does the whole pipeline per dataset rather than each stage across all of them, so an
 interrupted batch still leaves complete, scored results for what it finished. One dataset failing does not
 abort the rest — the failures are collected, reported at the end, and the exit code is non-zero.
-
-Tiers B and C are not currently reachable: cold indexing is O(N²) in vault size, and scifact's 5,183 notes
-already take about five and a half minutes. `dataset=all` will take a very long time and probably not finish.
 
 ### Configuration
 
