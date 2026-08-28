@@ -7,7 +7,15 @@ SHELL := bash
 
 # ── Configuration ────────────────────────────────────────────────────
 CARGO := cargo
+UV    := uv
 cmd   ?=
+
+# Benchmark settings. `dataset` picks the BEIR corpus; scifact is tier A and the
+# one most BEIR baseline papers report first, so a comparable number exists.
+dataset  ?= scifact
+FEATURES ?= stemming
+TARN_BIN := target/release/tarn-mcp
+BENCH    := $(UV) run --quiet python scripts
 
 GREEN  := \033[0;32m
 YELLOW := \033[0;33m
@@ -24,12 +32,17 @@ help:
 	@printf "$(BLUE)lint$(NC)     Code quality (cmd=check|fix|fmt)\n"
 	@printf "$(BLUE)doc$(NC)      Documentation (cmd=build|open)\n"
 	@printf "$(BLUE)clean$(NC)    Remove build artifacts and coverage reports\n"
-	@printf "$(BLUE)ci$(NC)       CI pipeline (cmd=full|quick)\n\n"
+	@printf "$(BLUE)ci$(NC)       CI pipeline (cmd=full|quick)\n"
+	@printf "$(BLUE)bench$(NC)    Retrieval evaluation (cmd=setup|list|download|adapt|search|score|ragas|report|clean)\n\n"
 	@printf "Examples:\n"
 	@printf "  make build                  Build in debug mode (default)\n"
 	@printf "  make build cmd=release      Build in release mode\n"
 	@printf "  make test cmd=integration   Run integration tests\n"
 	@printf "  make test cmd=coverage      Generate HTML coverage report\n"
+	@printf "  make bench                  Full retrieval eval on scifact\n"
+	@printf "  make bench dataset=nfcorpus Full retrieval eval on another corpus\n\n"
+	@printf "Benchmark results land in target/benchmarks/report.md.\n"
+	@printf "Note: '$(BLUE)make clean$(NC)' runs 'cargo clean', which deletes them along with target/.\n"
 
 # ── Build ────────────────────────────────────────────────────────────
 .PHONY: build
@@ -124,6 +137,57 @@ clean:
 	$(CARGO) clean
 	rm -rf coverage/
 	@printf "$(GREEN)✓ Clean complete$(NC)\n"
+
+# ── Benchmarks ───────────────────────────────────────────────────────
+# Datasets (inputs) live in data/; results live in target/benchmarks/.
+# The release binary is what gets measured, and the feature set it was built
+# with is passed through to the run manifest so the two cannot disagree.
+.PHONY: bench
+bench:
+	@case "$(cmd)" in \
+		setup) \
+			printf "$(BLUE)→ Syncing benchmark dependencies...$(NC)\n"; \
+			$(UV) sync;; \
+		list) \
+			$(BENCH)/download_beir.py --list;; \
+		download) \
+			printf "$(BLUE)→ Downloading $(dataset)...$(NC)\n"; \
+			$(BENCH)/download_beir.py $(dataset);; \
+		adapt) \
+			printf "$(BLUE)→ Building the $(dataset) vault...$(NC)\n"; \
+			$(BENCH)/beir_to_tarn.py $(dataset);; \
+		search) \
+			printf "$(BLUE)→ Searching $(dataset)...$(NC)\n"; \
+			$(BENCH)/run_search.py $(dataset) --tarn-bin $(TARN_BIN) --features "$(FEATURES)";; \
+		score) \
+			printf "$(BLUE)→ Scoring $(dataset)...$(NC)\n"; \
+			$(BENCH)/evaluate.py $(dataset);; \
+		ragas) \
+			printf "$(BLUE)→ Chunk-level cross-check on $(dataset)...$(NC)\n"; \
+			$(BENCH)/evaluate_ragas.py $(dataset) --tarn-bin $(TARN_BIN);; \
+		report) \
+			printf "$(BLUE)→ Rebuilding the report...$(NC)\n"; \
+			$(BENCH)/report.py;; \
+		clean) \
+			printf "$(BLUE)→ Removing benchmark datasets and results...$(NC)\n"; \
+			rm -rf target/benchmarks data; \
+			printf "$(GREEN)✓ Benchmark data cleared$(NC)\n";; \
+		""|all) \
+			printf "$(BLUE)→ Full retrieval eval on $(dataset)...$(NC)\n"; \
+			$(CARGO) build --release; \
+			$(UV) sync --quiet; \
+			$(BENCH)/download_beir.py $(dataset); \
+			$(BENCH)/beir_to_tarn.py $(dataset); \
+			$(BENCH)/run_search.py $(dataset) --tarn-bin $(TARN_BIN) --features "$(FEATURES)"; \
+			$(BENCH)/evaluate.py $(dataset); \
+			$(BENCH)/evaluate_ragas.py $(dataset) --tarn-bin $(TARN_BIN); \
+			$(BENCH)/report.py; \
+			printf "$(GREEN)✓ Report: target/benchmarks/report.md$(NC)\n";; \
+		*) \
+			printf "$(RED)✗ Unknown cmd '$(cmd)'$(NC)\n"; \
+			printf "Commands: all (default), setup, list, download, adapt, search, score, ragas, report, clean\n"; \
+			exit 1;; \
+	esac
 
 # ── CI ───────────────────────────────────────────────────────────────
 .PHONY: ci

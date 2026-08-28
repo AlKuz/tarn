@@ -1,0 +1,55 @@
+[project]
+name = "tarn-bench"
+version = "0.1.0"
+description = "Retrieval evaluation bench for tarn-mcp: BEIR datasets scored over MCP/stdio"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.34.2",
+    # Same import name and API as pytrec_eval, but ships prebuilt wheels rather
+    # than requiring a C++ toolchain to build trec_eval from source.
+    "pytrec-eval-terrier>=0.5.10",
+    "ragas>=0.4.3",
+    "datasets>=5.0.1",
+    # ragas 0.4.3 imports langchain_community.chat_models.vertexai at module
+    # scope; langchain-community 0.4 removed it, so ragas will not import at all
+    # without this pin.
+    "langchain-community<0.4",
+    # The distance measure behind the NonLLM* context metrics. ragas does not
+    # declare it, and raises ImportError at metric construction without it.
+    "rapidfuzz>=3.14.3",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "ruff>=0.16.5",
+    "types-requests>=2.32",
+]
+
+[tool.uv]
+# Not a distributable package — this project exists to pin the bench harness's
+# interpreter and dependencies. The scripts under scripts/ are run directly.
+package = false
+
+[tool.ruff]
+# The stages import each other as siblings (evaluate_ragas reuses evaluate's
+# parse_hits); without this ruff sorts them as third-party.
+src = ["scripts"]
+
+[tool.mypy]
+files = ["scripts"]
+# `files` only applies when mypy is invoked with no path arguments. `exclude`
+# holds regardless, which matters because tmp/ carries the drafts these scripts
+# grew from — same module names, so an unscoped run collides on every one.
+exclude = ["^tmp/", "^\\.venv/"]
+python_version = "3.12"
+strict = true
+# The stages are run as scripts from the repo root, not imported as a package.
+mypy_path = "scripts"
+explicit_package_bases = true
+
+# pytrec_eval is a C extension with no stubs; ragas and datasets ship none that
+# mypy can use. Their call sites are checked, their internals are not.
+[[tool.mypy.overrides]]
+module = ["pytrec_eval.*", "ragas.*", "datasets.*"]
+ignore_missing_imports = true
