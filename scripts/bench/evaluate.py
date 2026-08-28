@@ -77,6 +77,13 @@ def main() -> None:
 
     run: dict[str, dict[str, float]] = {}
     latencies: list[float] = []
+    # What each query costs an agent: how much it has to sift, and how much of
+    # its context window the answer occupies. token_count is absent from runs
+    # recorded before it was captured, which stays None rather than becoming 0 --
+    # a missing measurement is not a measurement of zero.
+    notes_returned: list[int] = []
+    sections_returned: list[int] = []
+    tokens_returned: list[int] = []
     empty = 0
     for line in tqdm(
         (run_dir / "run.jsonl").open(),
@@ -86,6 +93,13 @@ def main() -> None:
     ):
         rec = json.loads(line)
         latencies.append(rec["latency_ms"])
+        raw_hits = rec.get("hits", [])
+        notes_returned.append(len(raw_hits))
+        sections = [s for hit in raw_hits for s in hit.get("sections", [])]
+        sections_returned.append(len(sections))
+        counts = [s.get("token_count") for s in sections]
+        if counts and all(c is not None for c in counts):
+            tokens_returned.append(sum(c for c in counts if c is not None))
         hits = parse_hits(rec, filename_to_docid)
         if not hits:
             empty += 1
@@ -121,11 +135,20 @@ def main() -> None:
 
     latencies.sort()
 
-    def pct(p: float) -> float:
-        if not latencies:
+    def percentile(values: list[float], p: float) -> float:
+        if not values:
             return 0.0
-        idx = min(int(p * len(latencies)), len(latencies) - 1)
-        return round(latencies[idx], 3)
+        ordered = sorted(values)
+        idx = min(int(p * len(ordered)), len(ordered) - 1)
+        return round(ordered[idx], 3)
+
+    def pct(p: float) -> float:
+        return percentile(latencies, p)
+
+    def mean(values: list[int]) -> float | None:
+        return round(statistics.fmean(values), 1) if values else None
+
+    mean_latency = statistics.fmean(latencies) if latencies else 0.0
 
     payload = {
         "dataset": args.dataset,
@@ -137,7 +160,25 @@ def main() -> None:
             "p50": pct(0.50),
             "p95": pct(0.95),
             "p99": pct(0.99),
-            "mean": round(statistics.fmean(latencies), 3) if latencies else 0.0,
+            "mean": round(mean_latency, 3),
+        },
+        "retrieval_cost": {
+            "queries_per_second": (
+                round(1000 / mean_latency, 1) if mean_latency > 0 else None
+            ),
+            "notes_per_query": mean(notes_returned),
+            "sections_per_query": mean(sections_returned),
+            "tokens_per_query": mean(tokens_returned),
+            "tokens_per_query_p50": percentile(
+                [float(t) for t in tokens_returned], 0.50
+            )
+            if tokens_returned
+            else None,
+            "tokens_per_query_p95": percentile(
+                [float(t) for t in tokens_returned], 0.95
+            )
+            if tokens_returned
+            else None,
         },
         "aggregate": aggregate,
         "per_query": per_query,
@@ -157,7 +198,14 @@ def main() -> None:
             f"P {aggregate[f'P_{k}']:.4f}   "
             f"MAP {aggregate[f'map_cut_{k}']:.4f}"
         )
+    cost = payload["retrieval_cost"]
     print(f"  latency      p50 {pct(0.50):.1f}ms   p95 {pct(0.95):.1f}ms")
+    tokens = cost["tokens_per_query"]
+    print(
+        f"  cost/query   {cost['notes_per_query']} notes   "
+        f"{cost['sections_per_query']} sections   "
+        f"{f'{tokens:,.0f} tokens' if tokens else 'tokens unrecorded'}"
+    )
     print(f"full per-query results: {out_path}")
 
 

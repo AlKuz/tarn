@@ -253,14 +253,18 @@ stage does not rebuild, so there `FEATURES` only labels the manifest — build f
 Results land in `target/benchmarks/`:
 
 ```text
-report.md              # entry point: most recent run per dataset, and a row per version
-reports/0.9.1.md       # one version in full: configurations compared, history, per-run detail
-runs/<run-id>/         # the raw artifacts, with a manifest pinning build, features and corpus hash
+report.md                        # entry point: most recent run per dataset, a row per version
+0.9.1/
+  report.md                      # one version in full: configurations compared, history, detail
+  runs/<run-id>/                 # raw artifacts, with a manifest pinning build, features, corpus
+  state/<features>/<dataset>/    # the index tarn persisted, keyed so builds cannot share one
 ```
 
-Reports are split per version so they stay readable as runs accumulate, and within a version runs are grouped
-by configuration, so `TOP_K=20` against `TOP_K=100` is a table rather than an archaeology exercise. Datasets
-are downloaded into `data/`. Both trees are gitignored.
+Version is the top-level partition: everything a build produced sits together, with its report at the top.
+Within a version, runs are grouped by configuration, so `TOP_K=20` against `TOP_K=100` is a table rather than
+an archaeology exercise. Index state is keyed by version and features too, so two builds can never share one
+index — Tarn records nothing about what built an index, so a shared directory would silently reuse a stale
+one. Datasets are downloaded into `data/`. Both trees are gitignored.
 
 ### Individual stages
 

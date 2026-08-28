@@ -36,6 +36,10 @@ A second spawn here is cheap. The index and revision tracker both persist to
 --index-path, so this is a warm start: review_changes finds no changes and
 serving begins almost immediately.
 
+The state directory comes from the run's own manifest, not from Cargo.toml. It
+has to reattach to the index that produced the run being scored, which is not
+necessarily what the working tree would build today.
+
 Usage:
     python scripts/bench/evaluate_ragas.py scifact
 """
@@ -118,6 +122,18 @@ def main() -> None:
     vault = vault_dir(args.dataset)
     run_dir = Path(args.run_dir) if args.run_dir else latest_run_dir(args.dataset)
 
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    tarn = manifest.get("tarn", {})
+    state = state_dir(
+        tarn.get("version", "unknown"), tarn.get("features", "none"), args.dataset
+    )
+    if not state.exists():
+        raise SystemExit(
+            f"no index state at {state} for the run being scored. It was built by "
+            f"tarn {tarn.get('version')} with features {tarn.get('features')!r}; "
+            f"re-run scripts/bench/run_search.py {args.dataset} to rebuild it."
+        )
+
     id_map: dict[str, str] = json.loads((evals / "id_map.json").read_text())
     filename_to_docid = {v: k for k, v in id_map.items()}
     queries = {
@@ -144,7 +160,7 @@ def main() -> None:
             "--vault",
             str(vault.resolve()),
             "--index-path",
-            str(state_dir(args.dataset).resolve()),
+            str(state.resolve()),
             "--log-level",
             "warn",
         ]

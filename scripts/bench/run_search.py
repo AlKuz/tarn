@@ -21,13 +21,14 @@ import re
 import shutil
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
 from mcp_client import McpStdioClient
 from paths import eval_dir, new_run_dir, state_dir, vault_dir
-from provenance import build_manifest
+from provenance import build_manifest, cargo_version
 
 Json = dict[str, Any]
 
@@ -63,7 +64,8 @@ def extract_hits(raw_result: Json) -> list[Json]:
     relevance scale.
 
     heading_path is kept per section so evaluate_ragas.py can dereference the
-    exact section tarn matched, via tarn://note/{path}#{heading_path}.
+    exact section tarn matched, via tarn://note/{path}#{heading_path}, and
+    token_count so evaluate.py can total what a query costs an agent's context.
     """
     if raw_result.get("isError"):
         text = (raw_result.get("content") or [{}])[0].get("text", "")
@@ -81,7 +83,11 @@ def extract_hits(raw_result: Json) -> list[Json]:
     hits: list[Json] = []
     for note in results:
         sections = [
-            {"heading_path": s.get("heading_path", []), "score": s.get("score")}
+            {
+                "heading_path": s.get("heading_path", []),
+                "score": s.get("score"),
+                "token_count": s.get("token_count"),
+            }
             for s in note.get("sections", [])
         ]
         scores = [s["score"] for s in sections if s["score"] is not None]
@@ -93,6 +99,40 @@ def extract_hits(raw_result: Json) -> list[Json]:
             }
         )
     return hits
+
+
+def index_metrics(
+    state: Path,
+    info: Json,
+    expected_notes: int,
+    index_ready_seconds: float,
+    cold_start: bool,
+) -> Json:
+    """What the index cost to build and what it costs to hold.
+
+    Sizes are read by globbing the state directory rather than naming bm25.json
+    and its siblings, so this does not encode tarn's persistence layout.
+
+    notes_per_second is recorded only for a cold start. On a warm one the
+    handshake measures deserialising four JSON files, and dividing note count by
+    that would report an indexing rate the indexer never achieved.
+    """
+    files = {f.name: f.stat().st_size for f in sorted(state.glob("*")) if f.is_file()}
+    total = sum(files.values())
+    notes = info.get("note_count") or 0
+    return {
+        "notes_indexed": notes,
+        "notes_expected": expected_notes,
+        "tag_count": info.get("tag_count"),
+        "state_bytes": total,
+        "state_files": files,
+        "state_bytes_per_note": round(total / notes, 1) if notes else None,
+        "notes_per_second": (
+            round(notes / index_ready_seconds, 1)
+            if cold_start and index_ready_seconds > 0
+            else None
+        ),
+    }
 
 
 def main() -> None:
@@ -168,7 +208,8 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    state = state_dir(args.dataset)
+    version = cargo_version()
+    state = state_dir(version, args.features, args.dataset)
     if args.cold and state.exists():
         shutil.rmtree(state)
     state.mkdir(parents=True, exist_ok=True)
@@ -223,7 +264,7 @@ def main() -> None:
         manifest["timing"]["index_ready_seconds"] = round(index_ready_seconds, 3)
         manifest["timing"]["cold_start"] = cold_start
 
-        run_dir = new_run_dir(args.dataset, manifest["tarn"]["commit"])
+        run_dir = new_run_dir(version, args.dataset, manifest["tarn"]["commit"])
 
         tool = find_search_tool(client.list_tools(), args.tool_name)
 
@@ -231,7 +272,9 @@ def main() -> None:
         # this is a genuine readiness assertion rather than a directory listing.
         info = client.read_resource_json("tarn://vault/info")
         indexed, expected = info.get("note_count"), len(id_map)
-        manifest["dataset_indexed"] = {"note_count": indexed, "expected": expected}
+        manifest["index"] = index_metrics(
+            state, info, expected, index_ready_seconds, cold_start
+        )
         if indexed != expected:
             raise SystemExit(
                 f"index holds {indexed} of {expected} notes. Stale or partial state "

@@ -5,7 +5,7 @@ Reads target/benchmarks/runs/*/ and writes:
 
     report.md                 the entry point -- latest score per dataset, and
                               a link to every version report
-    reports/<version>.md      one file per tarn version, holding that version's
+    <version>/report.md       one file per tarn version, holding that version's
                               runs in full
 
 Results are not committed, so the reports carry their own history: each dataset
@@ -39,7 +39,7 @@ import json
 from typing import Any
 
 from download_beir import CATALOGUE, tier_of
-from paths import INDEX_PATH, REPORTS_DIR, all_run_dirs, version_report_path
+from paths import INDEX_PATH, all_run_dirs, version_report_path
 from provenance import dataset_fingerprint
 
 Json = dict[str, Any]
@@ -192,8 +192,11 @@ def config_comparison(runs: list[Json], ids: dict[str, str]) -> list[str]:
         "",
         "Same version, same corpus, different knobs. Best nDCG@10 first.",
         "",
-        "| Config | nDCG@10 | Δ | Recall@100 | MRR | MAP@10 | p50 | p95 | Runs |",
-        "|---|---|---|---|---|---|---|---|---|",
+        (
+            "| Config | nDCG@10 | Δ | Recall@100 | MRR | MAP@10 "
+            "| Notes/q | Tokens/q | p50 | p95 | Runs |"
+        ),
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for key, run in ordered:
         latency = run["metrics"].get("latency_ms", {})
@@ -206,6 +209,8 @@ def config_comparison(runs: list[Json], ids: dict[str, str]) -> list[str]:
             f"| {fmt(metric(run, 'recall_100'))} "
             f"| {fmt(metric(run, 'recip_rank'))} "
             f"| {fmt(metric(run, 'map_cut_10'))} "
+            f"| {count(cost(run, 'notes_per_query'), 1)} "
+            f"| {count(cost(run, 'tokens_per_query'))} "
             f"| {latency.get('p50', 0):.0f}ms "
             f"| {latency.get('p95', 0):.0f}ms "
             f"| {counts[key]} |"
@@ -238,6 +243,30 @@ def metric(run: Json, name: str) -> float | None:
 
 def fmt(value: float | None, places: int = 4) -> str:
     return "—" if value is None else f"{value:.{places}f}"
+
+
+def count(value: float | None, places: int = 0) -> str:
+    """A missing measurement renders as an em dash, never as zero.
+
+    Runs recorded before token_count was captured have no token totals. Showing
+    0 there would read as "this configuration returned nothing", which is the
+    opposite of what happened."""
+    return "—" if value is None else f"{value:,.{places}f}"
+
+
+def cost(run: Json, name: str) -> float | None:
+    value = run["metrics"].get("retrieval_cost", {}).get(name)
+    return None if value is None else float(value)
+
+
+def size(nbytes: float | None) -> str:
+    if not nbytes:
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if nbytes < 1024 or unit == "GB":
+            return f"{nbytes:.0f}{unit}" if unit == "B" else f"{nbytes:.1f}{unit}"
+        nbytes /= 1024
+    return "—"
 
 
 def delta(current: float | None, previous: float | None) -> str:
@@ -354,6 +383,57 @@ def detail_section(run: Json) -> list[str]:
             f"index ready {index_time(run['manifest'])}"
         ),
     ]
+
+    index = run["manifest"].get("index", {})
+    if index:
+        rate = index.get("notes_per_second")
+        built = (
+            f"built at {count(rate, 1)} notes/s"
+            if rate
+            else "build rate unmeasured on a warm start"
+        )
+        lines += [
+            "",
+            "### Indexing",
+            "",
+            (
+                f"{index.get('notes_indexed', 0):,} notes · "
+                f"{index.get('tag_count', 0):,} tags · "
+                f"state {size(index.get('state_bytes'))} "
+                f"({count(index.get('state_bytes_per_note'))} bytes/note) · "
+                f"{built}"
+            ),
+        ]
+        files = index.get("state_files") or {}
+        if files:
+            lines += [
+                "",
+                "| State file | Size |",
+                "|---|---|",
+                *(f"| `{n}` | {size(b)} |" for n, b in sorted(files.items())),
+            ]
+
+    retrieval = metrics.get("retrieval_cost") or {}
+    if retrieval:
+        tokens = retrieval.get("tokens_per_query")
+        lines += [
+            "",
+            "### Retrieval cost",
+            "",
+            (
+                f"Per query: {count(retrieval.get('notes_per_query'), 1)} notes · "
+                f"{count(retrieval.get('sections_per_query'), 1)} sections · "
+                f"{count(tokens)} tokens "
+                f"(p50 {count(retrieval.get('tokens_per_query_p50'))}, "
+                f"p95 {count(retrieval.get('tokens_per_query_p95'))}) · "
+                f"{count(retrieval.get('queries_per_second'), 1)} queries/s"
+            ),
+            "",
+            (
+                "Tokens per query is what a search costs an agent's context window — "
+                "the number section-level indexing exists to keep down."
+            ),
+        ]
 
     if run["ragas"]:
         aggregate_ragas = run["ragas"].get("aggregate", {})
@@ -521,9 +601,9 @@ def index(by_version: dict[str, list[Json]]) -> str:
     for version in newest_first:
         runs = by_version[version]
         datasets = sorted({r["metrics"]["dataset"] for r in runs})
-        link = version_report_path(version).name
+        rel = version_report_path(version).relative_to(INDEX_PATH.parent)
         lines.append(
-            f"| {version} | {len(runs)} | {', '.join(datasets)} | [reports/{link}](reports/{link}) |"
+            f"| {version} | {len(runs)} | {', '.join(datasets)} | [{rel}]({rel}) |"
         )
 
     return "\n".join(lines) + "\n"
@@ -542,9 +622,9 @@ def main() -> None:
     for run in runs:
         by_version.setdefault(tarn_version(run["manifest"]), []).append(run)
 
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     for version, version_runs in sorted(by_version.items()):
         path = version_report_path(version)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(version_report(version, version_runs))
         print(f"wrote {path}")
 

@@ -113,12 +113,19 @@ and reads like a regression in Tarn.
 so notes returned ≤ limit. The default would silently cap scoring below the k=100 cutoff.
 
 **`score_threshold` stays at 0.0.** It is compared against the fused reciprocal-rank score (k=60),
-where two ranking pipelines cap at ≈ 0.0328 — despite the parameter description claiming a 0.0–1.0
-scale. Any "sensible" threshold returns nothing at all.
+not a 0–1 relevance scale as the parameter description claims. Each contributing ranking pipeline can
+add at most `1/(60+1)` ≈ 0.0164. Any "sensible" threshold returns nothing at all.
 
 **The generated `# {title}` heading is load-bearing.** Tarn indexes sections delimited by headings,
 so a BEIR document with an empty title would produce a note with no heading. The adapter falls back
 to the doc id, which guarantees one section per note.
+
+**These corpora exercise BM25 alone, not the hybrid.** BEIR documents carry no tags, and the
+adapter invents none, so `tarn://vault/info` reports a `tag_count` of 0 and the tag-similarity scorer
+contributes nothing. RRF still runs, but it fuses a single list: measured on nfcorpus, every
+top-ranked result scores exactly `1/61` = 0.01639, the one-pipeline maximum. Read every number here
+as a measurement of lexical ranking. Tarn's tag scorer needs a tagged corpus to say anything about,
+and none of the ten datasets is one.
 
 **Only judged queries are issued.** BEIR ships every split's queries in one file — scifact has 1,109,
 of which 300 are judged in `test`. An unjudged query cannot be scored, so issuing it is pure cost and
@@ -133,10 +140,19 @@ Reports are split by Tarn version, and within a version by configuration.
 
 ```text
 target/benchmarks/
-  report.md              entry point: most recent run per dataset, and a row per version
-  reports/0.9.1.md       one version in full: configurations, history, per-run detail
-  runs/<run-id>/         the raw artifacts every report is derived from
+  report.md                        entry point: most recent run per dataset, a row per version
+  0.9.1/
+    report.md                      one version in full: configurations, history, per-run detail
+    runs/<run-id>/                 the raw artifacts every report is derived from
+    state/<features>/<dataset>/    the index tarn persisted, and the binary it was built by
 ```
+
+Index state is keyed by version **and** cargo features because Tarn records neither in what it
+persists — its `IndexMeta` carries a note count and a timestamp, nothing identifying the build or the
+tokenizer. Point two builds at one `--index-path` and the second reloads the first's index, finds no
+file changes, and skips reindexing. With a features difference that is not merely stale but wrong: a
+stemmed BM25 index answering naively-tokenized queries. Separate directories make it
+unrepresentable rather than detectable.
 
 Splitting by version is what keeps the files bounded. Runs accumulate for as long as the bench is
 used, and a single file holding all of them grows until nobody opens it. A version report covers one
@@ -211,6 +227,34 @@ watch only one: the most information-dense of the five, and what BEIR leaderboar
 then averages over queries. Where nDCG cares about getting the *first* good result near the top, MAP
 rewards ranking *many* good results well — the complementary view for datasets with several valid
 supporting documents per query (scifact, hotpotqa).
+
+### What retrieval costs
+
+Ranking quality is half the question. These are the other half, and they are recorded on every run.
+
+**Indexing**, in the run manifest: `notes_indexed` and `tag_count` (read from `tarn://vault/info`, so
+they are index counts rather than a directory listing), `state_bytes` with a per-file breakdown,
+`state_bytes_per_note`, and `notes_per_second`.
+
+That last one is recorded for **cold starts only**. On a warm start the handshake measures
+deserialising the persisted files, and dividing note count by that would report an indexing rate the
+indexer never achieved.
+
+Measured on nfcorpus: 3,633 notes in 235 s — 15 notes/s — producing 58.5 MB of state, about 17 KB
+per note, of which `bm25.json` is 97%.
+
+**Retrieval**, in `metrics.json`: `tokens_per_query` (mean, p50, p95), `notes_per_query`,
+`sections_per_query`, and `queries_per_second`.
+
+`tokens_per_query` is the one to watch. Tarn indexes sections so an agent can read a passage instead
+of a file, and this is the number that says whether that pays off — it is context window spent, per
+search, before the agent has reasoned about anything. At `TOP_K=100` on nfcorpus it is 17,532 tokens.
+`TOKEN_LIMIT` exists to bound it, and the configuration table puts the two halves of that trade side
+by side: what a budget saves in tokens against what it costs in recall.
+
+**Not measured: the number of indexed sections.** `VaultInfo` exposes a note count and a tag count
+only, and `Index::count()` is never surfaced over MCP. Reading `sections.json` directly would tie the
+bench to Tarn's on-disk format for one number, which is not worth it.
 
 ### Two scorers, two views of one run
 
