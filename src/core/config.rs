@@ -130,6 +130,19 @@ impl TarnConfig {
         self
     }
 
+    /// Override the revision tracker configuration.
+    ///
+    /// The index and the revision tracker persist to the same directory by default, and
+    /// [`TarnCore::review_changes`] diffs one against the other on startup. Overriding
+    /// either alone leaves them describing different vault states, so a caller relocating
+    /// persisted state must relocate both.
+    ///
+    /// [`TarnCore::review_changes`]: super::tarn_core::TarnCore::review_changes
+    pub fn with_revisions(mut self, config: RevisionTrackerConfig) -> Self {
+        self.revisions = config;
+        self
+    }
+
     fn get_storage_config(
         variables: &HashMap<String, String>,
     ) -> Result<StorageConfig, ConfigError> {
@@ -251,6 +264,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn with_revisions_overrides() {
+        let config = TarnConfig::local("/tmp/vault".into());
+        let new_revisions = RevisionTrackerConfig::InMemory(InMemoryRevisionTrackerConfig {
+            persistence_path: Some("/tmp/custom".into()),
+        });
+        let config = config.with_revisions(new_revisions);
+        match &config.revisions {
+            RevisionTrackerConfig::InMemory(c) => {
+                assert_eq!(
+                    c.persistence_path,
+                    Some(std::path::PathBuf::from("/tmp/custom"))
+                );
+            }
+        }
+    }
+
+    fn state_paths(
+        config: &TarnConfig,
+    ) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+        let index = match &config.index {
+            IndexConfig::InMemory(c) => c.persistence_path.clone(),
+        };
+        let revisions = match &config.revisions {
+            RevisionTrackerConfig::InMemory(c) => c.persistence_path.clone(),
+        };
+        (index, revisions)
+    }
+
+    #[test]
+    fn local_colocates_index_and_revision_state() {
+        let (index, revisions) = state_paths(&TarnConfig::local("/tmp/vault".into()));
+        assert!(index.is_some(), "local() must derive a persistence path");
+        assert_eq!(index, revisions);
+    }
+
+    #[test]
+    fn state_path_override_moves_index_and_revisions_together() {
+        // Mirrors the --index-path handling in src/main.rs. Relocating persisted state must
+        // move both ports: review_changes diffs the index against the revision tracker on
+        // startup, so a fresh index paired with a populated tracker emits no Created events
+        // and the index stays empty — every search then returns nothing, silently.
+        let state_path = std::path::PathBuf::from("/tmp/tarn-state");
+        let config = TarnConfig::local("/tmp/vault".into())
+            .with_index(IndexConfig::InMemory(InMemoryIndexConfig {
+                persistence_path: Some(state_path.clone()),
+                ..Default::default()
+            }))
+            .with_revisions(RevisionTrackerConfig::InMemory(
+                InMemoryRevisionTrackerConfig {
+                    persistence_path: Some(state_path.clone()),
+                },
+            ));
+
+        let (index, revisions) = state_paths(&config);
+        assert_eq!(index, Some(state_path.clone()));
+        assert_eq!(revisions, Some(state_path));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use tarn::common::Buildable;
 use tarn::index::{InMemoryIndexConfig, IndexConfig};
 use tarn::mcp::TarnMcpServer;
 use tarn::mcp::sync;
+use tarn::revisions::{InMemoryRevisionTrackerConfig, RevisionTrackerConfig};
 
 #[derive(Clone, ValueEnum)]
 enum Transport {
@@ -91,7 +92,7 @@ struct Cli {
     #[arg(long, default_value = "info")]
     log_level: LogLevel,
 
-    /// Override the default index persistence path
+    /// State directory for the index and revision tracker
     #[arg(long)]
     index_path: Option<PathBuf>,
 
@@ -115,12 +116,20 @@ async fn main() -> anyhow::Result<()> {
         TarnConfig::from_env()?
     };
 
-    // Override index persistence path if specified
-    if let Some(index_path) = cli.index_path {
-        config = config.with_index(IndexConfig::InMemory(InMemoryIndexConfig {
-            persistence_path: Some(index_path),
-            ..Default::default()
-        }));
+    // Relocate persisted state if specified. The index and the revision tracker must move
+    // together: review_changes diffs one against the other on startup, so a fresh index
+    // paired with a populated tracker yields no Created events and the index stays empty.
+    if let Some(state_path) = cli.index_path {
+        config = config
+            .with_index(IndexConfig::InMemory(InMemoryIndexConfig {
+                persistence_path: Some(state_path.clone()),
+                ..Default::default()
+            }))
+            .with_revisions(RevisionTrackerConfig::InMemory(
+                InMemoryRevisionTrackerConfig {
+                    persistence_path: Some(state_path),
+                },
+            ));
     }
 
     let core = Arc::new(config.build()?);

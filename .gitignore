@@ -5,3 +5,9 @@
 coverage/
 
 CLAUDE.md
+
+# Benchmark datasets — downloaded and generated, never hand-authored.
+# Results live under target/benchmarks/, already covered by /target.
+/data
+/.venv
+__pycache__/
