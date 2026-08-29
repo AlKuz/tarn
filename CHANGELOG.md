@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/AlKuz/tarn/compare/v0.9.1...v0.9.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* relocate the revision tracker with --index-path, and add a retrieval eval bench ([#60](https://github.com/AlKuz/tarn/issues/60)) ([a493a6e](https://github.com/AlKuz/tarn/commit/a493a6eef23bc235cd9fce67456108e2e6a58a36))
+
 ## [0.9.1](https://github.com/AlKuz/tarn/compare/v0.9.0...v0.9.1) (2026-05-01)
 
 
