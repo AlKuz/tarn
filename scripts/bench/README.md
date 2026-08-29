@@ -92,6 +92,14 @@ Both are gitignored.
 
 One run never overwrites another: each gets `runs/<UTC timestamp>-<dataset>-<tarn commit>/`.
 
+**The two input stages skip work they have already done**, so re-running the pipeline measures the
+binary rather than rebuilding the corpus underneath it. `download_beir.py` skips a dataset already in
+`data/raw/`; `beir_to_tarn.py` skips one whose vault and eval manifest are both complete — it keys on
+`checksums.json`, which it writes last, so an interrupted adapt is redone rather than trusted. Delete
+`data/vault/<name>` or `data/eval/<name>` to rebuild just that dataset, or `make bench cmd=clean` to
+remove `data/` and `target/benchmarks/` entirely. A rebuild clears the vault first: a corpus re-cut
+into fewer notes must not leave the notes it dropped behind for Tarn to index.
+
 ### Queries go through the real binary
 
 `run_search.py` spawns the shipped `tarn-mcp` and speaks MCP over stdio, exactly as an agent does. It

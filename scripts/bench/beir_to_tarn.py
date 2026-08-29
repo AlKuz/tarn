@@ -20,6 +20,10 @@ each becomes one note with exactly one section -- chunk == document. This
 sidesteps the section-vs-document aggregation problem a long-document dataset
 would need extra handling for (see README.md "Chunking granularity").
 
+A dataset that has already been adapted is skipped, the way download_beir.py
+skips one already downloaded. Delete data/vault/<name> or data/eval/<name> to
+rebuild it.
+
 Usage:
     python scripts/bench/beir_to_tarn.py scifact
     python scripts/bench/beir_to_tarn.py scifact --split test
@@ -53,6 +57,20 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def already_adapted(vault: Path, evals: Path) -> bool:
+    """True when a previous run produced a complete vault and eval manifest.
+
+    checksums.json is written last, so its presence is this stage's own "the run
+    finished" stamp -- an interrupted run leaves none and is redone. The two
+    outputs live in separate trees, so both are checked: gating on one alone
+    would let deleting the other skip into producing nothing.
+    """
+    manifest = ["checksums.json", "queries.jsonl", "qrels.tsv", "id_map.json"]
+    if not all((evals / name).exists() for name in manifest):
+        return False
+    return any(vault.glob("*.md"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -68,8 +86,22 @@ def main() -> None:
         raise SystemExit(
             f"{raw} does not exist -- run scripts/bench/download_beir.py {args.dataset} first"
         )
+    if already_adapted(vault, evals):
+        prior = json.loads((evals / "checksums.json").read_text())
+        print(
+            f"{args.dataset}: already adapted "
+            f"({prior['doc_count']} notes, split={prior['split']}) "
+            f"-- delete {vault} to rebuild"
+        )
+        return
     vault.mkdir(parents=True, exist_ok=True)
     evals.mkdir(parents=True, exist_ok=True)
+
+    # A rebuild only happens once something was deleted or changed, which is
+    # exactly when leftovers matter: writing into the old vault would leave notes
+    # from a previous corpus cut or split for tarn to index and score.
+    for stale in vault.glob("*.md"):
+        stale.unlink()
 
     # Line count first so the bar has a total. Cheap next to writing the notes,
     # and a bar without a total tells you nothing about how long is left.

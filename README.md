@@ -281,6 +281,9 @@ make bench cmd=report           # Rebuild report.md from existing runs
 make bench cmd=clean            # Remove data/ and target/benchmarks/
 ```
 
+`download` and `adapt` skip a dataset they have already prepared, so repeating a run costs nothing
+for the corpus. To rebuild one dataset, delete `data/vault/<name>` or `data/eval/<name>`.
+
 Requires [uv](https://docs.astral.sh/uv/); nothing else in this repository does, and `make build`, `test`, `lint`
 and `ci` are untouched by it. Note that `make clean` runs `cargo clean` and so removes benchmark history along
 with `target/` — use `make bench cmd=clean` when you mean the bench.
